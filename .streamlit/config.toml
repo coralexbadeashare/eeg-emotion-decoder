@@ -4,4 +4,7 @@ enableStaticServing = true
 
 [theme]
 base = "light"
-primaryColor = "#4C78A8"
+primaryColor = "#111528"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F7F9"
+textColor = "#111528"

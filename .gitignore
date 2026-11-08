@@ -5,3 +5,4 @@ emotion_weights.csv
 live_weights.csv
 .venv/
 static/live_emotions.json
+static/live_emotions.tmp

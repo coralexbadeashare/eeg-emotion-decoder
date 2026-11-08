@@ -1,11 +1,12 @@
-"""Bridge to the generative sculpture (static/linetree_studio.html), used unchanged.
+"""Bridge to the generative sculpture (static/linetree_studio.html).
 
 The page already plays back emotion predictions: its "EEG session" pane reads a JSON
   {"classes": ["01_JOY", "02_TENDERNESS", "03_NOSTALGIA", "04_SERENITY", "05_MELANCHOLY"],
    "sessions": {name: [{"trial_id", "proba": [5], "predicted", "confidence", "emotion"?}, ...]}}
 and turns the five probabilities into the heights of its five coloured strata. We build that JSON
 from the decoder's weights and hand it over through the page's own functions (eegAccept, eegShow)
-with a small script appended to the page; the page itself is not modified.
+with a small script appended to the page. The page's own code is not modified; it only
+gained a responsive-layout CSS block so the sculpture keeps its space inside the app.
 
 Live: the app rewrites static/live_emotions.json after every new window, and the appended script
 polls it once a second and moves the sculpture to the newest window.

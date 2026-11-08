@@ -141,7 +141,7 @@ fake LSL headset.
 | `live_lsl.py` | live decoding over LSL from a terminal |
 | `models/emotion5_v2.json` | the model |
 | `examples/` | three synthetic recordings + onsets files |
-| `static/linetree_studio.html` | the generative sculpture shown by the app's 🎨 Art view (unchanged; fed through its own EEG-playback functions, `emotion_decoder/art.py`) |
+| `static/linetree_studio.html` | the generative sculpture shown by the app's 🎨 Art view (fed through its own EEG-playback functions by `emotion_decoder/art.py`; the only change is a small responsive-layout CSS block) |
 | `tools/` | model export, example generation, CSV → LSL replay |
 | `tests/` | `pytest -q` |
 
