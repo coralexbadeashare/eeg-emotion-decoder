@@ -4,3 +4,4 @@ __pycache__/
 emotion_weights.csv
 live_weights.csv
 .venv/
+static/live_emotions.json

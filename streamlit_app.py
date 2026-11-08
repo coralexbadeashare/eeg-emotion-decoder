@@ -13,9 +13,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from emotion_decoder import EmotionModel, decode_recording, read_recording, read_onsets_table, label_accuracy
 from emotion_decoder.io import RecordingError
+from emotion_decoder import art
 from emotion_decoder.model import session_covariance, erp_filtered, N_BINS, BIN_MS
 from emotion_decoder.preprocess import CHANNELS, SFREQ, ONSET, N_SAMPLES
 
@@ -68,7 +70,9 @@ app_mode = st.sidebar.radio("Mode", ["Analyse a recording", "Live (run the app l
 def live_page():
     from emotion_decoder.live import LiveDecoder, CsvTail, LslSource, ReplaySource
 
-    st.title("EEG emotion decoder · live")
+    tl, tr_ = st.columns([5, 1])
+    tl.title("EEG emotion decoder · live")
+    art_on = tr_.toggle("🎨 Art view", key="art_live", help="Show the generative sculpture, driven live by the weights.")
     st.markdown("Weights for 5 emotions, updated every few seconds while the EEG arrives. Run the app on the "
                 "computer that records (`streamlit run streamlit_app.py`) and pick where the EEG comes from.")
     src_kind = st.sidebar.radio("EEG comes from", ["A CSV that is being written", "LSL stream (EmotivPRO)",
@@ -102,11 +106,15 @@ def live_page():
             else:
                 source = ReplaySource(read_recording(ROOT / "examples" / f"{EXAMPLES[ex]}.csv"), speed)
             st.session_state.live = {"src": source, "dec": LiveDecoder(every, calib, block, markers), "on": True,
-                                     "t0": time.time(), "err": None}
+                                     "t0": time.time(), "err": None, "art_n": 0}
+            art.clear_live()
         except Exception as e:  # noqa: BLE001
             st.error(f"Could not start: {e}")
     if c2.button("⏹ Stop", width="stretch") and "live" in st.session_state:
         st.session_state.live["on"] = False
+
+    if art_on:
+        components.html(art.page_html(live=True), height=900, scrolling=False)
 
     @st.fragment(run_every=1.0)
     def live_view():
@@ -120,6 +128,11 @@ def live_page():
                 dec.push(*L["src"].poll()); dec.step(); L["err"] = None
             except Exception as e:  # noqa: BLE001
                 L["err"] = str(e)
+        if len(dec.results) != L.get("art_n", 0):                  # feed the sculpture
+            r0 = dec.results[0]["start"] if dec.results else 0.0
+            art.write_live([{"weights": r["block_weights"], "name": f"t {r['start'] - r0:.0f} s",
+                             "kind": "" if dec.use_markers else "window"} for r in dec.results])
+            L["art_n"] = len(dec.results)
         if L["err"]:
             st.warning(f"Waiting for data: {L['err']}")
         m = st.columns(4)
@@ -216,7 +229,9 @@ mode, sharp = "model", 1.0
 st.sidebar.markdown(f"---\n[Code, CLI and contributing]({REPO})")
 
 # ------------------------------------------------------------------ header
-st.title("EEG emotion decoder")
+tl, tr_ = st.columns([5, 1])
+tl.title("EEG emotion decoder")
+art_on = tr_.toggle("🎨 Art view", key="art_rec", help="Show the generative sculpture, played window by window.")
 st.markdown(
     "From the EEG of an Emotiv FLEX2 recording, this app gives **weights for 5 emotions** "
     "(Joy, Tenderness, Serenity, Nostalgia, Melancholy) for a window every few seconds. Only the EEG CSV is "
@@ -264,6 +279,23 @@ if (~flat).sum() < 10:
     st.warning("Fewer than 10 usable windows: the session alignment is estimated from very little data.")
 if table.attrs.get("n_outside"):
     st.info(f"{table.attrs['n_outside']} onsets fall outside the recording and were skipped.")
+
+# ------------------------------------------------------------------ art view
+if art_on:
+    rows = []
+    lab_col = acc["label_column"] if acc else None
+    for j in range(n):
+        if flat[j]:
+            continue
+        rows.append({"weights": {e: float(table.loc[j, c]) for e, c in zip(EMOS, bcols)},
+                     "label": str(table.loc[j, lab_col]) if lab_col else None,
+                     "name": f"window {j + 1} · {t_tr[j]:.0f} s",
+                     "kind": "window" if onset_tbl is None and not use_markers else ""})
+    components.html(art.page_html(art.build_doc(rows, "recording")), height=900, scrolling=False)
+    st.caption("The sculpture's five strata follow the five emotion weights" +
+               (f" (averaged over the last {block} windows)" if block > 1 else "") +
+               ". Use its Play button to step through the windows; switch the toggle off for the analysis.")
+    st.stop()
 
 # ------------------------------------------------------------------ overview
 st.subheader("The whole session")

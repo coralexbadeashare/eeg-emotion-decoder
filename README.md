@@ -77,6 +77,12 @@ m.weights(trial)                                  # {"Joy": 0.31, "Tenderness": 
 m.weights_block(last_four_trials)
 ```
 
+## Art view
+
+The **🎨 Art view** switch (top right, in both modes) shows a generative sculpture whose five coloured strata
+follow the five emotion weights: on a recording it plays the windows one after another (its own Play
+button), live it moves to every new window as it is decoded.
+
 ## How it works
 
 1. **Cut** windows of 5.5 s (1408 samples × 30 channels): one every few seconds, or from 0.5 s before
@@ -135,6 +141,7 @@ fake LSL headset.
 | `live_lsl.py` | live decoding over LSL from a terminal |
 | `models/emotion5_v2.json` | the model |
 | `examples/` | three synthetic recordings + onsets files |
+| `static/linetree_studio.html` | the generative sculpture shown by the app's 🎨 Art view (unchanged; fed through its own EEG-playback functions, `emotion_decoder/art.py`) |
 | `tools/` | model export, example generation, CSV → LSL replay |
 | `tests/` | `pytest -q` |
 

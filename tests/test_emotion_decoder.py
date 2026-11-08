@@ -187,3 +187,16 @@ def test_windows_with_dropped_packets_are_skipped():
     hit = table[table.skipped.str.contains("missing")]
     assert 1 <= len(hit) <= 3 and hit.top_emotion.isna().all()
     assert (table.t_s[hit.index] > 23).all() and (table.t_s[hit.index] < 31).all()
+
+
+def test_art_doc_reorders_to_the_sculpture_strata():
+    from emotion_decoder import art
+    w = {"Joy": 0.1, "Tenderness": 0.2, "Serenity": 0.3, "Nostalgia": 0.15, "Melancholy": 0.25}
+    doc = art.build_doc([{"weights": w, "label": "serenity"}])
+    t = doc["sessions"]["recording"][0]
+    assert doc["classes"] == ["01_JOY", "02_TENDERNESS", "03_NOSTALGIA", "04_SERENITY", "05_MELANCHOLY"]
+    assert t["proba"] == [0.1, 0.2, 0.15, 0.3, 0.25] and t["predicted"] == "04_SERENITY" and t["emotion"] == "04_SERENITY"
+    html = art.page_html(doc)
+    page = art.PAGE.read_text(encoding="utf-8"); i = page.rfind("</body>")
+    assert html.count("Appended by the EEG emotion decoder") == 1
+    assert html.startswith(page[:i]) and html.endswith(page[i:])                       # page itself unchanged
