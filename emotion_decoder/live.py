@@ -14,35 +14,96 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from collections import deque
 
 import numpy as np
 
 from .io import _header_row
 from .model import EmotionModel, session_covariance, inverse_sqrt
-from .preprocess import CHANNELS, SFREQ, PRE_S, POST_S, N_SAMPLES, is_flat
+
+ALIGN_WINDOWS = 200                # the session alignment uses the covariance of the last 200 windows
+from .preprocess import CHANNELS, SFREQ, PRE_S, POST_S, N_SAMPLES, is_flat, channel_index
 
 BUFFER_S = 120
 
 
 class LiveDecoder:
+    """Decode a live EEG stream into 5 emotion weights.
+
+    every        a window every `every` seconds (ignored with use_markers=True)
+    calib        the first `calib` windows only calibrate the session alignment (no output)
+    block        block_weights = mean of the last `block` windows' probabilities
+    use_markers  windows start at the marker times given to push() instead of every `every` s
+    channel_names  the channel names of the eeg you will push, in their order (e.g. the labels of your
+                 stream, "Cz" or "EEG.Cz"); the 30 model channels are then picked by name, extra
+                 channels are ignored and missing ones raise. Without it, push() expects exactly the
+                 30 channels in CHANNELS order.
+
+    One LiveDecoder = one session (one headset placement): create a new one if the headset is re-placed.
+    """
+
     def __init__(self, every: float = 3.0, calib: int = 10, block: int = 4, use_markers: bool = False,
-                 model: EmotionModel | None = None):
+                 channel_names=None, model: EmotionModel | None = None):
         self.every, self.calib, self.block, self.use_markers = every, calib, block, use_markers
+        self.channel_names = list(channel_names) if channel_names is not None else None
+        self._idx = channel_index(self.channel_names) if self.channel_names is not None else None
+        self._warned: set[str] = set()
         self.model = model or EmotionModel()
         self.ts = deque(maxlen=BUFFER_S * SFREQ)
         self.x = deque(maxlen=BUFFER_S * SFREQ)
         self.pending: list[float] = []
         self.next_start: float | None = None
-        self.calib_windows: list[np.ndarray] = []
+        self._covs: deque = deque(maxlen=ALIGN_WINDOWS)   # per-window covariances (bounded memory)
+        self.n_windows = 0                                  # usable windows seen (calibration ones included)
         self.results: list[dict] = []
         self.n_samples = 0
         self.skipped = 0
 
+    def _warn(self, key: str, msg: str):
+        if key not in self._warned:
+            self._warned.add(key)
+            warnings.warn(msg, stacklevel=3)
+
+    def _check(self, ts: np.ndarray, eeg: np.ndarray) -> np.ndarray:
+        """Validate one pushed chunk; returns it as (30, n) float32 in CHANNELS order."""
+        eeg = np.asarray(eeg, np.float32)
+        n_exp = len(self.channel_names) if self.channel_names is not None else len(CHANNELS)
+        if eeg.ndim != 2 or eeg.shape[0] != n_exp:
+            hint = (" It looks transposed: pass eeg as (channels, samples)." if eeg.ndim == 2 and eeg.shape[1] == n_exp
+                    else "" if self.channel_names is not None
+                    else " Pass channel_names=... to LiveDecoder to select the 30 channels by name.")
+            raise ValueError(f"eeg has shape {eeg.shape}; expected ({n_exp}, n_samples).{hint}")
+        if eeg.shape[1] != len(ts):
+            raise ValueError(f"{len(ts)} timestamps but {eeg.shape[1]} samples in eeg")
+        if self._idx is not None:
+            eeg = eeg[self._idx]
+        if not np.isfinite(eeg).all():
+            self._warn("nan", "the EEG contains NaN/inf values; they are replaced by 0.")
+            eeg = np.nan_to_num(eeg, nan=0.0, posinf=0.0, neginf=0.0)
+        med = float(np.nanmedian(np.abs(eeg - np.nanmedian(eeg, axis=1, keepdims=True))))
+        if 0 < med < 0.01:
+            self._warn("units", "the EEG values are tiny: are they in volts? The model expects microvolts (multiply by 1e6).")
+        return eeg
+
+    def _check_rate(self):
+        n = min(len(self.ts), 2 * SFREQ)
+        if n >= SFREQ // 2 and "fs" not in self._warned:
+            tail = np.fromiter((self.ts[k] for k in range(len(self.ts) - n, len(self.ts))), float)
+            d = float(np.median(np.diff(tail)))
+            fs = 1.0 / d if d > 0 else float("inf")
+            if abs(fs - SFREQ) > 0.1 * SFREQ:
+                self._warn("fs", f"the timestamps suggest {fs:.0f} Hz; the model expects {SFREQ} Hz "
+                                 "(timestamps in seconds, one per sample).")
+
     def push(self, ts, eeg, markers=()):
-        ts = np.asarray(ts, float)
+        """Add new samples: ts (n,) in seconds, eeg (channels, n) in microvolts. markers: stimulus
+        times (same clock as ts), used when use_markers=True. Call step() afterwards."""
+        ts = np.asarray(ts, float).ravel()
         if len(ts):
-            self.ts.extend(ts); self.x.extend(np.asarray(eeg, np.float32).T); self.n_samples += len(ts)
+            eeg = self._check(ts, eeg)
+            self.ts.extend(ts); self.x.extend(eeg.T); self.n_samples += len(ts)
+            self._check_rate()
         if self.use_markers:
             self.pending += [float(m) for m in markers]
         elif self.ts:
@@ -54,9 +115,11 @@ class LiveDecoder:
     @property
     def calibrated(self) -> bool:
         """True once more than `calib` windows were seen: the first `calib` only calibrate."""
-        return len(self.calib_windows) > self.calib
+        return self.n_windows > self.calib
 
     def step(self) -> list[dict]:
+        """Decode every window that is now complete (5 s after its start). Returns the new results,
+        each {"start", "weights", "block_weights", "proba", "decoded_at"}; all are kept in .results."""
         if not self.ts:
             return []
         ts = np.fromiter(self.ts, float)
@@ -67,12 +130,12 @@ class LiveDecoder:
             if (i0 + N_SAMPLES > len(ts) or ts[i0] - (start - PRE_S) > 0.05
                     or ts[i0 + N_SAMPLES - 1] - ts[i0] - (N_SAMPLES - 1) / SFREQ > 0.05):   # dropped packets
                 self.skipped += 1; continue
-            xs = list(self.x)
-            win = np.stack(xs[i0:i0 + N_SAMPLES], axis=1)
+            win = np.stack([self.x[k] for k in range(i0, i0 + N_SAMPLES)], axis=1)
             if is_flat(win[None])[0]:
                 self.skipped += 1; continue
-            self.calib_windows.append(win)
-            self.model.W = inverse_sqrt(session_covariance(self.calib_windows[-200:]))
+            self._covs.append(session_covariance([win]))
+            self.n_windows += 1
+            self.model.W = inverse_sqrt(np.mean(self._covs, axis=0))
             if not self.calibrated:
                 continue
             p = self.model.proba([win])[0]
@@ -111,7 +174,7 @@ class CsvTail:
             self.drop_partial = False
 
     def _init_header(self, text: str):
-        lines = text.splitlines()
+        lines = [l.lstrip("\ufeff") for l in text.splitlines()]
         k = _header_row(lines)
         cols = [c.strip() for c in lines[k].split(",")]
         pre = all(f"EEG.{c}" in cols for c in CHANNELS)
@@ -126,7 +189,9 @@ class CsvTail:
 
     def poll(self):
         if not os.path.exists(self.path):
-            raise FileNotFoundError(self.path)
+            raise FileNotFoundError(f"no such file: {self.path}")
+        if os.path.getsize(self.path) < self.pos:          # truncated or replaced: start over
+            self.pos, self.cols, self.buf, self.rows, self.drop_partial = 0, None, "", 0, False
         with open(self.path, "r", encoding="utf-8", errors="replace") as f:
             f.seek(self.pos)
             chunk = f.read()
@@ -172,8 +237,9 @@ class LslSource:
         for _ in range(info.channel_count()):
             labels.append(ch.child_value("label").replace("EEG.", "")); ch = ch.next_sibling()
         if all(c in labels for c in CHANNELS):
-            self.idx = [labels.index(c) for c in CHANNELS]
+            self.idx = channel_index(labels)
         elif info.channel_count() == 30:
+            warnings.warn("the LSL stream has no channel labels: assuming the 30 channels are in CHANNELS order")
             self.idx = list(range(30))
         else:
             raise RuntimeError(f"cannot find the 30 FLEX2 channels in the stream labels: {labels}")

@@ -37,7 +37,7 @@ def read_recording(source) -> dict:
         buf = io.BytesIO(raw)
     else:
         buf = open(source, "rb")                        # large files: never decoded as a whole
-    head = [buf.readline().decode("utf-8", errors="replace") for _ in range(5)]
+    head = [buf.readline().decode("utf-8", errors="replace").lstrip("\ufeff") for _ in range(5)]
     buf.seek(0)
     skip = _header_row(head)
     cols = [c.strip() for c in head[skip].split(",")]
@@ -52,7 +52,7 @@ def read_recording(source) -> dict:
     marker_cols = [c for c in ("MarkerIndex", "MarkerValueInt") if c in cols]
     use = (["Timestamp"] if "Timestamp" in cols else []) + eeg_cols + marker_cols
 
-    df = pd.read_csv(buf, skiprows=skip, usecols=use, on_bad_lines="skip", low_memory=False)
+    df = pd.read_csv(buf, skiprows=skip, usecols=use, on_bad_lines="skip", low_memory=False, encoding="utf-8-sig")
     if not hasattr(source, "read"):
         buf.close()
     df = df.apply(pd.to_numeric, errors="coerce")

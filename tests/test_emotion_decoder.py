@@ -174,7 +174,7 @@ def test_live_default_windows_every_3s(tmp_path):
         tail = tail or CsvTail(str(dst))
         dec.push(*tail.poll()); dec.step()
     starts = [r["start"] for r in dec.results]
-    assert len(dec.calib_windows) >= 35 and len(starts) == len(dec.calib_windows) - 5
+    assert dec.n_windows >= 35 and len(starts) == dec.n_windows - 5
     assert np.allclose(np.diff(starts), 3.0)
 
 
@@ -200,3 +200,117 @@ def test_art_doc_reorders_to_the_sculpture_strata():
     page = art.PAGE.read_text(encoding="utf-8"); i = page.rfind("</body>")
     assert html.count("Appended by the EEG emotion decoder") == 1
     assert html.startswith(page[:i]) and html.endswith(page[i:])                       # page itself unchanged
+
+
+# ---------------------------------------------------------------- robustness / error handling
+def _stream(rec, i0, i1):
+    return rec["ts"][i0:i1], rec["eeg"][:, i0:i1]
+
+
+def test_select_channels_by_name_any_order_with_extras():
+    from emotion_decoder import select_channels, CHANNELS
+    rng = np.random.default_rng(0)
+    names = ["COUNTER"] + [f"EEG.{c}" for c in CHANNELS[::-1]] + ["MOT.AccX"]
+    eeg = rng.standard_normal((len(names), 50))
+    out = select_channels(eeg, names)
+    assert out.shape == (30, 50) and np.array_equal(out[0], eeg[names.index("EEG.Cz")])
+    with pytest.raises(ValueError, match="missing EEG channel.*F8"):
+        select_channels(eeg[:-2], names[:-2])                      # drops EEG.Cz? no: drops F8-side + MOT
+    with pytest.raises(ValueError, match="transposed"):
+        select_channels(eeg.T, names)
+
+
+def test_live_channel_names_give_the_same_result():
+    from emotion_decoder.live import LiveDecoder
+    rec = read_recording(EX / "example_1_clear.csv")
+    names = ["COUNTER"] + [f"EEG.{c}" for c in CHANNELS[::-1]]
+    a, b = LiveDecoder(calib=3, block=2), LiveDecoder(calib=3, block=2, channel_names=names)
+    for i in range(0, 40 * 256, 256):
+        ts, x = _stream(rec, i, i + 256)
+        a.push(ts, x); a.step()
+        b.push(ts, np.vstack([np.zeros((1, x.shape[1])), x[::-1]])); b.step()
+    assert len(a.results) == len(b.results) > 0
+    assert a.results[-1]["weights"] == b.results[-1]["weights"]
+
+
+def test_live_push_rejects_bad_shapes_clearly():
+    from emotion_decoder.live import LiveDecoder
+    dec = LiveDecoder()
+    ts = np.arange(100) / 256
+    with pytest.raises(ValueError, match="transposed"):
+        dec.push(ts, np.zeros((100, 30)))
+    with pytest.raises(ValueError, match="channel_names"):
+        dec.push(ts, np.zeros((32, 100)))
+    with pytest.raises(ValueError, match="timestamps"):
+        dec.push(ts[:50], np.zeros((30, 100)))
+
+
+def test_live_warns_on_volts_wrong_rate_and_nan():
+    from emotion_decoder.live import LiveDecoder
+    rng = np.random.default_rng(1)
+    with pytest.warns(UserWarning, match="volts"):
+        LiveDecoder().push(np.arange(256) / 256, rng.standard_normal((30, 256)) * 1e-5)
+    dec = LiveDecoder()
+    with pytest.warns(UserWarning, match="128 Hz"):
+        for k in range(4):
+            dec.push((np.arange(128) + 128 * k) / 128, rng.standard_normal((30, 128)) * 10)
+    x = rng.standard_normal((30, 256)) * 10; x[3, 10] = np.nan
+    with pytest.warns(UserWarning, match="NaN"):
+        LiveDecoder().push(np.arange(256) / 256, x)
+
+
+def test_live_memory_is_bounded():
+    from emotion_decoder.live import LiveDecoder, ALIGN_WINDOWS
+    rng = np.random.default_rng(2)
+    dec = LiveDecoder(every=1.0, calib=2)
+    for k in range(ALIGN_WINDOWS + 30):
+        dec.push((np.arange(256) + 256 * k) / 256, rng.standard_normal((30, 256)) * 10); dec.step()
+    assert dec.n_windows > ALIGN_WINDOWS and len(dec._covs) == ALIGN_WINDOWS
+
+
+def test_window_starting_in_a_gap_is_skipped():
+    from emotion_decoder import decode_recording
+    rec = read_recording(EX / "example_2_moderate.csv")
+    keep = np.ones(len(rec["ts"]), bool); keep[int(19.0 * 256):int(21.0 * 256)] = False   # 2 s lost
+    rec2 = dict(rec, ts=rec["ts"][keep], eeg=rec["eeg"][:, keep])
+    onset = rec["ts"][0] + 20.0                                     # its window would start inside the gap
+    table, _ = decode_recording(rec2, onsets=[onset, rec["ts"][0] + 40.0])
+    assert table.loc[0, "flat"] and "missing" in table.loc[0, "skipped"] and not table.loc[1, "flat"]
+
+
+def test_all_windows_skipped_keeps_columns():
+    rec = read_recording(EX / "example_1_clear.csv")
+    rec0 = dict(rec, eeg=np.zeros_like(rec["eeg"]))
+    from emotion_decoder import decode_recording
+    table, _ = decode_recording(rec0, block=4)
+    assert table["flat"].all() and {"w_Joy", "top_emotion", "block4_Joy"} <= set(table.columns)
+    assert label_accuracy(table, EmotionModel().emotions) is None
+
+
+def test_unsorted_onsets_are_sorted_with_their_labels():
+    from emotion_decoder import decode_recording
+    rec = read_recording(EX / "example_1_clear.csv")
+    on = pd.read_csv(EX / "example_1_clear_onsets.csv")
+    t1, _ = decode_recording(rec, onset_table=on, block=4)
+    t2, _ = decode_recording(rec, onset_table=on.sample(frac=1, random_state=0), block=4)
+    pd.testing.assert_frame_equal(t1, t2)
+
+
+def test_csv_with_bom_and_tail_restart(tmp_path):
+    from emotion_decoder.live import CsvTail
+    rows = "\n".join(",".join([f"{k / 256:.6f}"] + ["1.0"] * 30) for k in range(600))
+    text = ",".join(["Timestamp"] + [f"EEG.{c}" for c in CHANNELS]) + "\n" + rows + "\n"
+    p = tmp_path / "bom.csv"; p.write_bytes(b"\xef\xbb\xbf" + text.encode())
+    assert read_recording(p)["eeg"].shape == (30, 600)
+    tail = CsvTail(str(p)); ts, x, _ = tail.poll()
+    assert x.shape == (30, 600)
+    p.write_bytes(b"\xef\xbb\xbf" + text[: len(text) // 3].rsplit("\n", 1)[0].encode() + b"\n")   # replaced by a shorter file
+    ts2, x2, _ = tail.poll()
+    assert x2.shape[1] > 0 and ts2[0] == 0.0
+
+
+def test_cli_reports_missing_files_without_traceback(tmp_path):
+    with pytest.raises(SystemExit, match="error: .*no_such"):
+        cli_main([str(tmp_path / "no_such.csv")])
+    with pytest.raises(SystemExit, match="error: "):
+        cli_main([str(EX / "example_1_clear.csv"), "--onsets", str(tmp_path / "no_such_onsets.csv")])

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -12,7 +13,7 @@ import pandas as pd
 
 from .io import read_recording, read_onsets_table
 from .model import EmotionModel
-from .preprocess import cut_trials, is_flat, sliding_onsets, missing_seconds, MAX_MISSING_S
+from .preprocess import cut_trials, is_flat, sliding_onsets, missing_seconds, MAX_MISSING_S, SFREQ
 
 LABEL_COLUMNS = ("emotion", "label", "true_emotion")
 
@@ -60,7 +61,9 @@ def decode_trials(trials, onsets=None, block: int = 1, mode: str = "model", shar
                 row.update({f"block{block}_{k}": v for k, v in wb.items()})
                 row[f"block{block}_top"] = max(wb, key=wb.get)
         rows.append(row)
-    table = pd.DataFrame(rows)
+    cols = (["trial", "onset_unix", "flat", "skipped"] + [f"w_{k}" for k in model.emotions] + ["top_emotion"]
+            + ([f"block{block}_{k}" for k in model.emotions] + [f"block{block}_top"] if block > 1 else []))
+    table = pd.DataFrame(rows).reindex(columns=cols)         # same columns even if every window is skipped
     if extra is not None and len(extra) == n:
         table = pd.concat([table, extra.reset_index(drop=True)], axis=1)
     t0 = np.nanmin(onsets) if np.isfinite(onsets).any() else np.nan
@@ -75,7 +78,11 @@ def decode_recording(rec: dict, onsets=None, onset_table: pd.DataFrame | None = 
     Optional: stimulus onsets (`onsets` / `onset_table` with column onset_unix) or, with
     use_markers=True, the markers stored in the file."""
     extra = None
+    fs = rec.get("fs_estimate", SFREQ)
+    if np.isfinite(fs) and abs(fs - SFREQ) > 0.1 * SFREQ:
+        warnings.warn(f"the recording's timestamps suggest {fs:.0f} Hz; the model expects {SFREQ} Hz", stacklevel=2)
     if onset_table is not None:
+        onset_table = onset_table.sort_values("onset_unix", kind="stable").reset_index(drop=True)
         onsets = onset_table["onset_unix"].to_numpy(float)
         extra = onset_table.drop(columns=["onset_unix"])
     if onsets is None:
@@ -87,7 +94,7 @@ def decode_recording(rec: dict, onsets=None, onset_table: pd.DataFrame | None = 
             onsets = sliding_onsets(rec["ts"], sliding_step)
         else:
             raise ValueError("no windows: give sliding_step, onsets, or use_markers=True")
-    onsets = np.asarray(onsets, float)
+    onsets = np.sort(np.asarray(onsets, float)) if extra is None else np.asarray(onsets, float)
     trials, ok = cut_trials(rec["ts"], rec["eeg"], onsets)
     if len(ok) == 0:
         raise ValueError(f"none of the {len(onsets)} onsets has a full trial inside the recording "

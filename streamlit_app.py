@@ -298,11 +298,11 @@ def live_page():
         m = st.columns(4)
         m[0].metric("Status", "Running" if L["on"] else "Stopped")
         m[1].metric("EEG received", f"{dec.n_samples / SFREQ:.0f} s")
-        m[2].metric("Calibration", f"{min(len(dec.calib_windows), dec.calib)} / {dec.calib}")
+        m[2].metric("Calibration", f"{min(dec.n_windows, dec.calib)} / {dec.calib}")
         m[3].metric("Windows decoded", len(dec.results))
 
         if not dec.results:
-            done = min(len(dec.calib_windows), dec.calib) / dec.calib
+            done = min(dec.n_windows, dec.calib) / dec.calib
             st.progress(done, text=f"Calibrating the session alignment · first weights after about "
                                    f"{dec.calib * dec.every + 5:.0f} s of EEG")
         else:
@@ -415,13 +415,21 @@ key = hashlib.md5(data).hexdigest()
 try:
     rec = load_recording(key, data)
 except RecordingError as e:
-    st.error(f"Could not read this file: {e}")
+    st.error(f"Could not read this file: {e}", icon=":material/error:")
     st.stop()
+except Exception as e:  # noqa: BLE001 - any other unreadable file: say so instead of a traceback
+    st.error(f"Could not read this file ({type(e).__name__}): {e}", icon=":material/error:")
+    st.stop()
+if np.isfinite(rec["fs_estimate"]) and abs(rec["fs_estimate"] - SFREQ) > 0.1 * SFREQ:
+    st.warning(f"The timestamps suggest {rec['fs_estimate']:.0f} Hz; the model expects {SFREQ} Hz.")
 okey = hashlib.md5(onset_tbl.to_csv().encode()).hexdigest() if onset_tbl is not None else "none"
 try:
     table, trials, onsets, flat, proba, Rcov, W = run(f"{key}-{okey}", rec, onset_tbl, every, use_markers, block)
 except ValueError as e:
     st.warning(str(e))
+    st.stop()
+except Exception as e:  # noqa: BLE001
+    st.error(f"Could not decode this recording ({type(e).__name__}): {e}", icon=":material/error:")
     st.stop()
 
 n = len(table)

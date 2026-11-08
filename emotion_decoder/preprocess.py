@@ -29,13 +29,37 @@ def cut_trials(ts: np.ndarray, eeg: np.ndarray, onsets) -> tuple[np.ndarray, np.
     return np.nan_to_num(eeg[:, idx]).transpose(1, 0, 2).astype(np.float32), ok
 
 
+def channel_index(names) -> list[int]:
+    """Positions of the 30 model channels (CHANNELS order) inside a list of channel names.
+    Accepts "Cz" or EmotivPRO-style "EEG.Cz"; extra channels are ignored; missing ones raise."""
+    clean = [str(n).strip().replace("EEG.", "") for n in names]
+    missing = [c for c in CHANNELS if c not in clean]
+    if missing:
+        raise ValueError(f"missing EEG channel(s): {', '.join(missing)}. The model needs the 30 Emotiv FLEX2 "
+                         f"channels {', '.join(CHANNELS)}; got {', '.join(clean)}")
+    return [clean.index(c) for c in CHANNELS]
+
+
+def select_channels(eeg, names) -> np.ndarray:
+    """eeg (len(names), n) in any channel order, with extra channels -> (30, n) in CHANNELS order."""
+    eeg = np.asarray(eeg)
+    if eeg.ndim != 2 or eeg.shape[0] != len(names):
+        hint = " (it looks transposed: pass (channels, samples))" if eeg.ndim == 2 and eeg.shape[1] == len(names) else ""
+        raise ValueError(f"eeg has shape {eeg.shape} but {len(names)} channel names were given{hint}")
+    return eeg[channel_index(names)]
+
+
 MAX_MISSING_S = 0.05               # training trials with more missing time than this were excluded
 
 
 def missing_seconds(ts: np.ndarray, onsets) -> np.ndarray:
-    """Time lost to dropped packets inside each window (its timestamps span more than 1408 samples)."""
-    starts = np.searchsorted(ts, np.asarray(onsets, float) - PRE_S)
-    return np.maximum(ts[starts + N_SAMPLES - 1] - ts[starts] - (N_SAMPLES - 1) / SFREQ, 0.0)
+    """Time lost to dropped packets in each window: data missing at its start (the first sample comes
+    later than 0.5 s before the onset) plus gaps inside it (its 1408 samples span more than 5.5 s)."""
+    want = np.asarray(onsets, float) - PRE_S
+    starts = np.searchsorted(ts, want)
+    late_start = ts[starts] - want                    # the window would begin after a gap (or before the recording)
+    inside = ts[starts + N_SAMPLES - 1] - ts[starts] - (N_SAMPLES - 1) / SFREQ
+    return np.maximum(late_start, 0.0) + np.maximum(inside, 0.0)
 
 
 def is_flat(trials: np.ndarray) -> np.ndarray:

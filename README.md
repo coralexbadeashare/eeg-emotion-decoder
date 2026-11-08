@@ -48,10 +48,11 @@ from emotion_decoder.live import LiveDecoder
 dec = LiveDecoder(every=3.0,       # a window every 3 s (ignored with use_markers=True)
                   calib=10,        # the first 10 windows only calibrate the session alignment
                   block=4,         # block_weights = mean of the last 4 windows' probabilities
-                  use_markers=False)
+                  use_markers=False,
+                  channel_names=None)  # optional: your stream's channel names (any order, extras ok)
 
 # every time new samples arrive:
-dec.push(timestamps, eeg)          # timestamps: (n,) seconds; eeg: (30, n) µV
+dec.push(timestamps, eeg)          # timestamps: (n,) seconds; eeg: (channels, n) µV
 for r in dec.step():               # windows that became complete (5 s after their start)
     r["start"]                     # window start, same clock as timestamps
     r["weights"]                   # this window
@@ -59,9 +60,15 @@ for r in dec.step():               # windows that became complete (5 s after the
     r["proba"]                     # numpy array, model order
 
 dec.calibrated                     # True once the alignment is calibrated
+dec.n_windows                      # usable windows seen so far (calibration ones included)
 dec.results                        # every decoded window so far
 dec.skipped                        # windows skipped (flat signal or dropped packets)
 ```
+
+`channel_names` picks the 30 model channels **by name** from whatever your stream carries ("Cz" or
+EmotivPRO's "EEG.Cz", in any order, extra channels such as counters or contact quality are ignored).
+Without it, `push` expects exactly the 30 channels in `CHANNELS` order. For arrays you hold yourself:
+`select_channels(eeg, names)` does the same and returns `(30, n)`.
 
 Optional, windows at stimulus onsets instead of every few seconds: create it with `use_markers=True` and pass
 the onset times: `dec.push(timestamps, eeg, markers=[t_image])`. With LSL, `pylsl.local_clock()` at the moment
@@ -83,6 +90,24 @@ while True:
     for r in dec.step():
         print(r["block_weights"])
 ```
+
+### Integration checklist
+
+| check | what happens if it is wrong |
+|---|---|
+| EEG in **microvolts** (Emotiv's unit) | values in volts trigger a warning; every window would look flat and be skipped |
+| **256 Hz**, one timestamp per sample, in **seconds** | another rate triggers a warning; the windows would have the wrong length |
+| shape **(channels, samples)** | (samples, channels) raises an error that says it looks transposed |
+| the **30 FLEX2 channels**, by name or in `CHANNELS` order | a missing channel raises an error listing it; use `channel_names=` for other orders |
+| markers on the **same clock** as the EEG timestamps (e.g. `pylsl.local_clock()` with an LSL EEG stream) | windows would start at the wrong moment |
+| **one `LiveDecoder` per session** (headset placement) | after re-placing the headset, create a new one so the alignment recalibrates |
+| the same FLEX2 **electrode montage** as in training | other positions: the channel names will not match and the model does not apply |
+
+Handled for you: flat windows (headset not recording) and windows with more than 50 ms of data missing
+(dropped packets, including a window that would start inside a gap) are skipped and counted in
+`dec.skipped`; NaN values are replaced by 0 with a warning; memory stays bounded in long sessions (the
+alignment uses the last 200 windows). Errors are `ValueError`s with a message that says what to fix;
+warnings are Python `UserWarning`s, shown once.
 
 ### Recordings: `decode_csv`
 

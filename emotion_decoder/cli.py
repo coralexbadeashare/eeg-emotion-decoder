@@ -36,7 +36,7 @@ def main(argv=None):
         else:
             table, _ = decode_csv(a.input, a.onsets, block=a.block, mode=a.mode, sharp=a.sharp,
                                   sliding_step=a.every, use_markers=a.markers)
-    except ValueError as e:
+    except (ValueError, OSError) as e:                     # bad file, missing file, wrong format
         sys.exit(f"error: {e}")
 
     table.to_csv(a.out, index=False)
