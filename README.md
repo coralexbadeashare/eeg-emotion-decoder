@@ -22,6 +22,98 @@ cd eeg-emotion-decoder
 pip install -r requirements.txt          # numpy, scipy, pandas, streamlit, plotly
 ```
 
+## Use it as a library (API)
+
+Install it into any Python project (3.9+); it needs only numpy, scipy and pandas:
+
+```bash
+pip install "git+https://github.com/coralexbadeashare/eeg-emotion-decoder"
+pip install "emotion-decoder[live] @ git+https://github.com/coralexbadeashare/eeg-emotion-decoder"   # + pylsl, for LSL
+```
+
+Or, without installing: copy the `emotion_decoder/` folder next to your code (the model is inside it).
+
+**Input format everywhere:** EEG in µV at 256 Hz, the 30 Emotiv FLEX2 channels in this order:
+`emotion_decoder.preprocess.CHANNELS` = Cz, Fz, F7, F3, FC1, C3, FC5, FT9, T7, CP5, CP1, P3, P7, PO9, O1, Pz,
+Oz, O2, PO10, P8, P4, CP2, CP6, T8, FT10, FC6, C4, FC2, F4, F8. Timestamps in seconds (any clock, the same for
+EEG and markers). Weights are `{"Joy", "Tenderness", "Serenity", "Nostalgia", "Melancholy"}` → float, summing to 1.
+
+### Live: `LiveDecoder`
+
+For a stream you already read yourself (PyQt, LSL, a device SDK, …):
+
+```python
+from emotion_decoder.live import LiveDecoder
+
+dec = LiveDecoder(every=3.0,       # a window every 3 s (ignored with use_markers=True)
+                  calib=10,        # the first 10 windows only calibrate the session alignment
+                  block=4,         # block_weights = mean of the last 4 windows' probabilities
+                  use_markers=False)
+
+# every time new samples arrive:
+dec.push(timestamps, eeg)          # timestamps: (n,) seconds; eeg: (30, n) µV
+for r in dec.step():               # windows that became complete (5 s after their start)
+    r["start"]                     # window start, same clock as timestamps
+    r["weights"]                   # this window
+    r["block_weights"]             # averaged over the last `block` windows
+    r["proba"]                     # numpy array, model order
+
+dec.calibrated                     # True once the alignment is calibrated
+dec.results                        # every decoded window so far
+dec.skipped                        # windows skipped (flat signal or dropped packets)
+```
+
+Optional, windows at stimulus onsets instead of every few seconds: create it with `use_markers=True` and pass
+the onset times: `dec.push(timestamps, eeg, markers=[t_image])`. With LSL, `pylsl.local_clock()` at the moment
+the image appears is on the same clock as the EEG stream's timestamps.
+
+Ready-made sources (each `.poll()` returns `(timestamps, eeg, marker_times)` for `dec.push(*...)`):
+
+| | |
+|---|---|
+| `LslSource(markers=False)` | the first LSL stream of type EEG (picks the 30 channels by label), optionally a Markers stream |
+| `CsvTail(path, from_end=True)` | a CSV that another program keeps appending to |
+| `ReplaySource(recording, speed=1.0)` | a recording replayed as if it were arriving now |
+
+```python
+from emotion_decoder.live import LiveDecoder, LslSource
+src, dec = LslSource(), LiveDecoder()
+while True:
+    dec.push(*src.poll())
+    for r in dec.step():
+        print(r["block_weights"])
+```
+
+### Recordings: `decode_csv`
+
+```python
+from emotion_decoder import decode_csv, label_accuracy
+
+table, details = decode_csv("recording.csv", block=4)                  # a window every 3 s
+table, details = decode_csv("recording.csv", sliding_step=2.0)         # every 2 s
+table, details = decode_csv("recording.csv", use_markers=True)         # at MarkerIndex markers
+table, details = decode_csv("recording.csv", "onsets.csv", block=4)    # at the onsets in a CSV
+```
+
+`table` (pandas): one row per window: `trial`, `onset_unix`, `t_s`, `flat` (skipped), `skipped` (why),
+`w_<Emotion>` ×5, `top_emotion`, and with `block > 1` also `block<N>_<Emotion>` and `block<N>_top`; extra columns of
+the onsets CSV are copied. `details` holds the cut windows (`details.trials`, (n, 30, 1408)) and probabilities.
+`label_accuracy(table, emotions)` scores `top_emotion` against an `emotion` column, if there is one.
+`decode_recording(read_recording(path), ...)` does the same from an already-read recording, and
+`decode_trials(trials)` from windows you cut yourself.
+
+### Low level: `EmotionModel`
+
+```python
+from emotion_decoder import EmotionModel
+
+m = EmotionModel()                     # the shipped model
+m.calibrate(session_windows)           # (n, 30, 1408) windows of ONE session: 0.5 s before to 5.0 s after their start
+m.weights(window)                      # one window -> {"Joy": .., ...}
+m.weights_block(last_windows)          # mean over several windows
+m.proba(windows)                       # (n, 5), order m.emotions
+```
+
 ## Try it on the examples
 
 ```bash
@@ -95,7 +187,7 @@ button), live it moves to every new window as it is decoded.
 4. **Shrinkage LDA**: distance of those 600 numbers to each emotion's average response, measured against
    trial-to-trial noise → 5 probabilities.
 
-The model (`models/emotion5_v2.json`) is plain numbers exported from the scikit-learn checkpoint in
+The model (`emotion_decoder/models/emotion5_v2.json`) is plain numbers exported from the scikit-learn checkpoint in
 [eeg-stimulus-type-baselines](https://github.com/coralexbadeashare/eeg-stimulus-type-baselines)
 (`checkpoints/emotion5`). The tests check that this code gives the same weights as the original; on the
 844 training-set trials the difference is exactly 0.
@@ -139,7 +231,7 @@ fake LSL headset.
 | `emotion_decoder/` | the package: `io` (CSV reading), `preprocess` (cutting), `model` (alignment, ERP, LDA), `pipeline`, `cli`, `live` |
 | `streamlit_app.py` | the app |
 | `live_lsl.py` | live decoding over LSL from a terminal |
-| `models/emotion5_v2.json` | the model |
+| `emotion_decoder/models/emotion5_v2.json` | the model (installed with the package) |
 | `examples/` | three synthetic recordings + onsets files |
 | `static/linetree_studio.html` | the generative sculpture shown by the app's 🎨 Art view (fed through its own EEG-playback functions by `emotion_decoder/art.py`; the only change is a small responsive-layout CSS block) |
 | `tools/` | model export, example generation, CSV → LSL replay |

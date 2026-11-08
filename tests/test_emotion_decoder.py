@@ -43,7 +43,7 @@ def session():
 
 
 def test_model_matches_sklearn_self_check():
-    d = json.loads((ROOT / "models" / "emotion5_v2.json").read_text())
+    d = json.loads((ROOT / "emotion_decoder" / "models" / "emotion5_v2.json").read_text())
     m = EmotionModel()
     X = np.random.default_rng(d["self_check"]["seed"]).standard_normal((d["self_check"]["n"], 600))
     p = m.proba_from_features(X * m.scale + m.mean)          # self-check inputs are in scaled units

@@ -1,4 +1,4 @@
-"""Export the 5-emotion checkpoint (emotion_weights_v2.joblib, scikit-learn 1.7.2) to models/emotion5_v2.json.
+"""Export the 5-emotion checkpoint (emotion_weights_v2.joblib, scikit-learn 1.7.2) to emotion_decoder/models/emotion5_v2.json.
 
 The checkpoint comes from https://github.com/coralexbadeashare/eeg-stimulus-type-baselines
 (checkpoints/emotion5). The JSON holds plain numbers only: the feature scaler, the shrinkage-LDA
@@ -19,7 +19,7 @@ import sklearn
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joblib", required=True)
-    ap.add_argument("--out", default=str(Path(__file__).resolve().parent.parent / "models" / "emotion5_v2.json"))
+    ap.add_argument("--out", default=str(Path(__file__).resolve().parent.parent / "emotion_decoder" / "models" / "emotion5_v2.json"))
     a = ap.parse_args()
 
     b = joblib.load(a.joblib)

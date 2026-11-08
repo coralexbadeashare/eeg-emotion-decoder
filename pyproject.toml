@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emotion-decoder"
+version = "0.1.0"
+description = "Five emotion weights from Emotiv FLEX2 EEG: session alignment + ERP shape + shrinkage LDA"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0"]
+
+[project.optional-dependencies]
+live = ["pylsl>=1.16"]
+app = ["streamlit>=1.50", "plotly>=5.20"]
+
+[project.urls]
+Repository = "https://github.com/coralexbadeashare/eeg-emotion-decoder"
+
+[tool.setuptools]
+packages = ["emotion_decoder"]
+
+[tool.setuptools.package-data]
+emotion_decoder = ["models/*.json"]

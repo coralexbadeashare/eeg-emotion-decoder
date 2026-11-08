@@ -18,7 +18,7 @@ from scipy.signal import butter, sosfiltfilt
 
 from .preprocess import ONSET, WIN
 
-MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "emotion5_v2.json"
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "emotion5_v2.json"      # shipped inside the package
 _SOS_COV = butter(4, [1, 45], btype="band", fs=256, output="sos")
 _SOS_ERP = butter(4, [1, 30], btype="band", fs=256, output="sos")
 N_BINS, BIN = 20, 12                       # 20 bins x 12 samples = 240 samples = 0-937.5 ms
@@ -59,7 +59,7 @@ def _softmax(z):
 
 class EmotionModel:
     """
-    m = EmotionModel()                       # loads models/emotion5_v2.json
+    m = EmotionModel()                       # loads emotion_decoder/models/emotion5_v2.json
     m.calibrate(session_trials)              # (n, 30, 1408) trials of ONE session, no labels needed
     m.weights(trial)                         # {"Joy": .., "Tenderness": .., ...}
     m.weights_block(last_trials)             # average over a block of trials: more accurate
@@ -109,7 +109,7 @@ class EmotionModel:
         z = np.log(np.clip(np.asarray(p, np.float64), 1e-9, 1))
         z = z / (self.T if mode == "calibrated" else 1.0) * sharp
         w = _softmax(z)
-        return dict(zip(self.emotions, np.round(w, 4)))
+        return {e: round(float(v), 4) for e, v in zip(self.emotions, w)}
 
     def weights(self, trial, mode="model", sharp=1.0) -> dict:
         return self.to_weights(self.proba([trial])[0], mode, sharp)
