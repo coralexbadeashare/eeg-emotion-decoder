@@ -20,6 +20,7 @@ Pull requests are welcome from anyone; see [CONTRIBUTING.md](CONTRIBUTING.md).
 git clone https://github.com/coralexbadeashare/eeg-emotion-decoder
 cd eeg-emotion-decoder
 pip install -r requirements.txt          # numpy, scipy, pandas, streamlit, plotly
+pip install pylsl                        # only for live input over LSL
 ```
 
 ## Use it as a library (API)
@@ -201,12 +202,6 @@ m.weights(trial)                                  # {"Joy": 0.31, "Tenderness": 
 m.weights_block(last_four_trials)
 ```
 
-## Art view
-
-The **🎨 Art view** switch (top right, in both modes) shows a generative sculpture whose five coloured strata
-follow the five emotion weights: on a recording it plays the windows one after another (its own Play
-button), live it moves to every new window as it is decoded.
-
 ## How it works
 
 1. **Cut** windows of 5.5 s (1408 samples × 30 channels): one every few seconds, or from 0.5 s before
@@ -248,7 +243,7 @@ Run the app on the computer that records, choose **Live** in the sidebar, then t
 - **A CSV that is being written**: paste its path (Windows paths work as they are). The app reads only the
   new rows, every second. Whatever writes the file must append rows continuously (`Timestamp`,
   `EEG.Cz` … `EEG.F8`).
-- **LSL stream**: EmotivPRO can stream EEG to Lab Streaming Layer (needs `pip install -r requirements-live.txt`).
+- **LSL stream**: EmotivPRO can stream EEG to Lab Streaming Layer (needs `pip install pylsl`).
 - **Simulation**: replays an example as if it were arriving now, to try everything without a headset.
 
 The first windows (10 by default, about 35 s) only calibrate the session alignment; after that, the weights
@@ -260,12 +255,11 @@ fake LSL headset.
 
 | | |
 |---|---|
-| `emotion_decoder/` | the package: `io` (CSV reading), `preprocess` (cutting), `model` (alignment, ERP, LDA), `pipeline`, `cli`, `live` |
+| `emotion_decoder/` | the package: `io` (CSV reading), `preprocess` (windows, quality checks, channels), `model` (alignment, ERP, LDA), `pipeline` (recordings), `live` (streams), `cli`, `synthetic` (example generator) |
 | `streamlit_app.py` | the app |
 | `live_lsl.py` | live decoding over LSL from a terminal |
 | `emotion_decoder/models/emotion5_v2.json` | the model (installed with the package) |
 | `examples/` | three synthetic recordings + onsets files |
-| `static/linetree_studio.html` | the generative sculpture shown by the app's 🎨 Art view (fed through its own EEG-playback functions by `emotion_decoder/art.py`; the only change is a small responsive-layout CSS block) |
 | `tools/` | model export, example generation, CSV → LSL replay |
 | `tests/` | `pytest -q` |
 

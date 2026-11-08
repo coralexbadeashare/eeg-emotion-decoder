@@ -13,10 +13,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 from emotion_decoder import EmotionModel, decode_recording, read_recording, read_onsets_table, label_accuracy
-from emotion_decoder import art
 from emotion_decoder.io import RecordingError
 from emotion_decoder.model import session_covariance, erp_filtered, N_BINS, BIN_MS
 from emotion_decoder.preprocess import CHANNELS, SFREQ, ONSET, N_SAMPLES
@@ -31,7 +29,7 @@ EXAMPLES = {
     "Example 2 · moderate": "example_2_moderate",
     "Example 3 · hard, no markers, 2 dropouts": "example_3_hard_no_markers",
 }
-# The sculpture's palette, a shade deeper so it reads on white. Strata order, bottom to top.
+# Emotion colours, and the order emotions are stacked in (bottom to top) in every chart.
 ORDER = ["Joy", "Tenderness", "Nostalgia", "Serenity", "Melancholy"]
 EMO_COLORS = {"Joy": "#F0C232", "Tenderness": "#E795D3", "Nostalgia": "#2A7276",
               "Serenity": "#5DBFB0", "Melancholy": "#78BEE4"}
@@ -152,14 +150,6 @@ def style(fig: go.Figure, height: int, legend: bool = False, **kw) -> go.Figure:
     return fig
 
 
-def embed(html: str, height: int = 950):
-    """The sculpture page, same-origin (the live view fetches /app/static/live_emotions.json)."""
-    if hasattr(st, "iframe"):
-        st.iframe(html, height=height)
-    else:                                            # Streamlit < 1.52
-        components.html(html, height=height, scrolling=False)
-
-
 def plot(fig, key=None):
     st.plotly_chart(fig, width="stretch", config=PLOT_CFG, key=key)
 
@@ -171,13 +161,10 @@ def stacked(x, chans, t, sp=None, color=INK2, width=0.8):
     return traces, sp
 
 
-def header(eyebrow: str, title: str, sub: str, toggle_key: str, toggle_help: str) -> bool:
-    left, right = st.columns([5, 1.1], vertical_alignment="bottom")
-    with left:
-        st.markdown(f'<div class="eyebrow">{eyebrow}</div>', unsafe_allow_html=True)
-        st.title(title)
-        st.markdown(f'<p class="subtitle">{sub}</p>', unsafe_allow_html=True)
-    return right.toggle("🎨 Art view", key=toggle_key, help=toggle_help)
+def header(eyebrow: str, title: str, sub: str):
+    st.markdown(f'<div class="eyebrow">{eyebrow}</div>', unsafe_allow_html=True)
+    st.title(title)
+    st.markdown(f'<p class="subtitle">{sub}</p>', unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner="Reading the recording …", max_entries=4)
@@ -236,9 +223,8 @@ def live_page():
                           help="CSV: the MarkerIndex column. LSL: a stream of type Markers.")
     side_foot()
 
-    art_on = header("Live · run locally", "Live decoding",
-                    "Weights for five emotions, updated with every new window while the EEG arrives.",
-                    "art_live", "Show the generative sculpture, driven live by the weights.")
+    header("Live · run locally", "Live decoding",
+           "Weights for five emotions, updated with every new window while the EEG arrives.")
 
     if src_kind.startswith("A CSV"):
         desc = f"Following <b>{path or '— enter a path in the sidebar'}</b>" + (" · new data only" if from_end else " · from the start")
@@ -263,15 +249,11 @@ def live_page():
             else:
                 source = ReplaySource(read_recording(ROOT / "examples" / f"{EXAMPLES[ex]}.csv"), speed)
             st.session_state.live = {"src": source, "dec": LiveDecoder(every, calib, block, markers), "on": True,
-                                     "t0": time.time(), "err": None, "art_n": 0}
-            art.clear_live()
+                                     "t0": time.time(), "err": None}
         except Exception as e:  # noqa: BLE001
             st.error(f"Could not start: {e}")
     if stop and "live" in st.session_state:
         st.session_state.live["on"] = False
-
-    if art_on:
-        embed(art.page_html(live=True))
 
     @st.fragment(run_every=1.0)
     def live_view():
@@ -285,11 +267,6 @@ def live_page():
                 dec.push(*L["src"].poll()); dec.step(); L["err"] = None
             except Exception as e:  # noqa: BLE001
                 L["err"] = str(e)
-        if len(dec.results) != L.get("art_n", 0):                   # feed the sculpture
-            r0 = dec.results[0]["start"] if dec.results else 0.0
-            art.write_live([{"weights": r["block_weights"], "name": f"t {r['start'] - r0:.0f} s",
-                             "kind": "" if dec.use_markers else "window"} for r in dec.results])
-            L["art_n"] = len(dec.results)
         if L["err"]:
             st.warning(f"Waiting for data: {L['err']}", icon=":material/hourglass_top:")
         if not dec.n_samples and L["on"] and time.time() - L["t0"] > 5:
@@ -393,10 +370,10 @@ block = sb.slider("Average over the last N windows", 1, 8, 4,
                   help="Averaging the probabilities of consecutive windows makes the weights steadier.")
 side_foot()
 
-art_on = header("EEG → five emotions", "EEG emotion decoder",
-                "From an Emotiv FLEX2 recording, weights for five emotions (Joy, Tenderness, Nostalgia, Serenity "
-                "and Melancholy) for a window every few seconds. Only the EEG is needed.",
-                "art_rec", "Show the generative sculpture, played window by window.")
+header("EEG → five emotions", "EEG emotion decoder",
+       "From an Emotiv FLEX2 recording, weights for five emotions (Joy, Tenderness, Nostalgia, Serenity "
+       "and Melancholy) for a window every few seconds. Only the EEG is needed.")
+
 st.markdown("""
 <div class="steps">
   <div class="step"><span class="n">1</span><b>Cut</b><p>5.5 s of EEG per window, 30 channels at 256 Hz.</p></div>
@@ -456,25 +433,8 @@ if (~flat).sum() < 10:
 if table.attrs.get("n_outside"):
     st.info(f"{table.attrs['n_outside']} onsets fall outside the recording and were skipped.")
 
-# ------------------------------------------------------------------ art view
-if art_on:
-    rows = []
-    lab_col = acc["label_column"] if acc else None
-    for j in range(n):
-        if flat[j]:
-            continue
-        rows.append({"weights": {e: float(table.loc[j, bcols[e]]) for e in EMOS},
-                     "label": str(table.loc[j, lab_col]) if lab_col else None,
-                     "name": f"window {j + 1} · {t_tr[j]:.0f} s",
-                     "kind": "window" if onset_tbl is None and not use_markers else ""})
-    section("Sculpture", "The five strata follow the five weights" +
-            (f", averaged over the last {block} windows" if block > 1 else "") +
-            ". Play steps through the windows; switch Art view off for the analysis.")
-    embed(art.page_html(art.build_doc(rows, "recording")))
-    st.stop()
-
 # ------------------------------------------------------------------ session overview
-section("The session", "Each window's five weights, stacked like the sculpture's strata"
+section("The session", "Each window's five weights, stacked"
         + (f" (averaged over the last {block} windows)" if block > 1 else "") + ".")
 with st.container(border=True):
     st.markdown(chips(), unsafe_allow_html=True)
