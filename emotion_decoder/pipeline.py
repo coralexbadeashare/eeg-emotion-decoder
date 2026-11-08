@@ -63,22 +63,25 @@ def decode_trials(trials, onsets=None, block: int = 1, mode: str = "model", shar
     return table, Details(trials, onsets, flat, proba, model, extra=extra if extra is not None else pd.DataFrame())
 
 
-def decode_recording(rec: dict, onsets=None, onset_table: pd.DataFrame | None = None, sliding_step: float | None = None,
-                     block: int = 1, mode: str = "model", sharp: float = 1.0, model: EmotionModel | None = None):
-    """rec: output of io.read_recording. Onsets, in order of preference: `onsets` / `onset_table`
-    (column onset_unix), the markers stored in the file, or (experimental) sliding windows."""
+def decode_recording(rec: dict, onsets=None, onset_table: pd.DataFrame | None = None, sliding_step: float | None = 3.0,
+                     use_markers: bool = False, block: int = 1, mode: str = "model", sharp: float = 1.0,
+                     model: EmotionModel | None = None):
+    """rec: output of io.read_recording. Default: EEG only, a window every `sliding_step` seconds.
+    Optional: stimulus onsets (`onsets` / `onset_table` with column onset_unix) or, with
+    use_markers=True, the markers stored in the file."""
     extra = None
     if onset_table is not None:
         onsets = onset_table["onset_unix"].to_numpy(float)
         extra = onset_table.drop(columns=["onset_unix"])
     if onsets is None:
-        if len(rec["markers"]):
+        if use_markers:
+            if not len(rec["markers"]):
+                raise ValueError("this recording has no markers (EmotivPRO MarkerIndex column is empty)")
             onsets = rec["markers"]
         elif sliding_step:
             onsets = sliding_onsets(rec["ts"], sliding_step)
         else:
-            raise ValueError("no stimulus onsets: give an onsets CSV (column onset_unix), or a recording with "
-                             "markers (EmotivPRO MarkerIndex column)")
+            raise ValueError("no windows: give sliding_step, onsets, or use_markers=True")
     onsets = np.asarray(onsets, float)
     trials, ok = cut_trials(rec["ts"], rec["eeg"], onsets)
     if len(ok) == 0:

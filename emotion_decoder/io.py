@@ -31,9 +31,14 @@ def read_recording(source) -> dict:
 
     Returns dict(ts (N,), eeg (30, N) float32, markers (unix seconds), fs_estimate, n_raw_columns)
     """
-    raw = source.read() if hasattr(source, "read") else open(source, "rb").read()
-    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-    head = text.splitlines()[:5]
+    if hasattr(source, "read"):
+        raw = source.read()
+        raw = raw.encode() if isinstance(raw, str) else raw
+        buf = io.BytesIO(raw)
+    else:
+        buf = open(source, "rb")                        # large files: never decoded as a whole
+    head = [buf.readline().decode("utf-8", errors="replace") for _ in range(5)]
+    buf.seek(0)
     skip = _header_row(head)
     cols = [c.strip() for c in head[skip].split(",")]
 
@@ -47,7 +52,9 @@ def read_recording(source) -> dict:
     marker_cols = [c for c in ("MarkerIndex", "MarkerValueInt") if c in cols]
     use = (["Timestamp"] if "Timestamp" in cols else []) + eeg_cols + marker_cols
 
-    df = pd.read_csv(io.StringIO(text), skiprows=skip, usecols=use, on_bad_lines="skip", low_memory=False)
+    df = pd.read_csv(buf, skiprows=skip, usecols=use, on_bad_lines="skip", low_memory=False)
+    if not hasattr(source, "read"):
+        buf.close()
     df = df.apply(pd.to_numeric, errors="coerce")
     if "Timestamp" in df:
         df = df.dropna(subset=["Timestamp"]).sort_values("Timestamp").reset_index(drop=True)

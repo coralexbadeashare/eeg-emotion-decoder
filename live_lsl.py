@@ -4,18 +4,17 @@ Not yet tested with a real headset. Tested with tools/replay_csv_to_lsl.py, whic
 fake headset. Needs: pip install pylsl
 
 How it works
-  1. Finds an LSL stream of type EEG (EmotivPRO can stream to LSL; enable it in EmotivPRO's settings)
-     and, if present, a stream of type Markers carrying one marker per stimulus.
+  1. Finds an LSL stream of type EEG (EmotivPRO can stream to LSL; enable it in EmotivPRO's settings).
+     Optional (--markers): a stream of type Markers carrying one marker per stimulus.
   2. Keeps the last 60 s of EEG. Picks the 30 FLEX2 channels by their labels in the stream description
      (EmotivPRO also streams counters, contact quality, ...).
-  3. The first --calib trials only calibrate the session alignment (no output). After that, every
-     stimulus is decoded 5 s after its onset, and the weights are printed and appended to --out.
-     The alignment keeps updating with every new trial.
-  Without a marker stream, --every N makes a pseudo-stimulus every N seconds (EXPERIMENTAL: the model
-  was trained on stimulus onsets).
+  3. A window starts every --every seconds (default 3); each is decoded 5 s after its start. The first
+     --calib windows only calibrate the session alignment (no output); the alignment keeps updating.
+     With --markers, windows start at the stimulus markers instead.
 
-  python live_lsl.py                        # EEG + Markers streams
-  python live_lsl.py --every 6 --calib 10   # no markers
+  python live_lsl.py                        # EEG only, a window every 3 s
+  python live_lsl.py --every 2 --calib 20
+  python live_lsl.py --markers              # optional: windows at stimulus markers
 """
 from __future__ import annotations
 
@@ -51,9 +50,10 @@ def channel_index(inlet) -> list[int]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--calib", type=int, default=15, help="trials used only to calibrate the alignment")
+    ap.add_argument("--calib", type=int, default=15, help="windows used only to calibrate the alignment")
     ap.add_argument("--block", type=int, default=4)
-    ap.add_argument("--every", type=float, default=None, help="no marker stream: pseudo-stimulus every N s")
+    ap.add_argument("--every", type=float, default=3.0, help="EEG only (default): a window every N s")
+    ap.add_argument("--markers", action="store_true", help="optional: windows at a Markers stream instead")
     ap.add_argument("--out", default="live_weights.csv")
     ap.add_argument("--timeout", type=float, default=10.0)
     a = ap.parse_args()
@@ -63,9 +63,9 @@ def main():
     if eeg_in is None:
         raise SystemExit("no LSL stream of type EEG found (is EmotivPRO streaming to LSL?)")
     idx = channel_index(eeg_in)
-    mk_in = None if a.every else find_stream(pylsl, "Markers", a.timeout)
-    if mk_in is None and not a.every:
-        raise SystemExit("no Markers stream found; use --every N for pseudo-stimuli")
+    mk_in = find_stream(pylsl, "Markers", a.timeout) if a.markers else None
+    if a.markers and mk_in is None:
+        raise SystemExit("--markers given but no LSL stream of type Markers found")
     print(f"EEG: {eeg_in.info().name()} @ {eeg_in.info().nominal_srate():g} Hz; "
           f"markers: {mk_in.info().name() if mk_in else f'every {a.every} s'}")
 

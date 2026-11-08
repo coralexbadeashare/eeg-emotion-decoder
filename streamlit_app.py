@@ -1,4 +1,4 @@
-"""EEG emotion decoder: upload an Emotiv recording, watch every step, get 5 emotion weights per trial.
+"""EEG emotion decoder: upload an Emotiv recording, watch every step, get 5 emotion weights per window.
 
 Run:  streamlit run streamlit_app.py
 """
@@ -39,9 +39,10 @@ def load_recording(key: str, _data: bytes) -> dict:
     return read_recording(io.BytesIO(_data))
 
 
-@st.cache_data(show_spinner="Cutting trials, aligning the session, computing weights ...", max_entries=8)
-def run(key: str, _rec: dict, _onsets: pd.DataFrame | None, sliding: float | None, block: int, mode: str, sharp: float):
-    table, d = decode_recording(_rec, onset_table=_onsets, sliding_step=sliding, block=block, mode=mode, sharp=sharp)
+@st.cache_data(show_spinner="Cutting windows, aligning the session, computing weights ...", max_entries=8)
+def run(key: str, _rec: dict, _onsets: pd.DataFrame | None, every: float, use_markers: bool, block: int, mode: str, sharp: float):
+    table, d = decode_recording(_rec, onset_table=_onsets, sliding_step=every, use_markers=use_markers,
+                                block=block, mode=mode, sharp=sharp)
     good = ~d.flat
     R = session_covariance(d.trials[good]) if good.any() else np.eye(30)
     W = d.model.W if d.model.W is not None else np.eye(30)
@@ -59,64 +60,190 @@ def stacked(x, chans, t, sp=None, color="#444", width=0.9):
 model = EmotionModel()
 EMOS = model.emotions
 st.sidebar.title("🧠 EEG emotion decoder")
-st.sidebar.caption("Emotiv FLEX2 recording → trials → session alignment → evoked response → 5 emotion weights")
+st.sidebar.caption("Emotiv FLEX2 EEG → windows → session alignment → response shape → 5 emotion weights")
+
+app_mode = st.sidebar.radio("Mode", ["Analyse a recording", "Live (run the app locally)"], horizontal=False)
+
+
+def live_page():
+    from emotion_decoder.live import LiveDecoder, CsvTail, LslSource, ReplaySource
+
+    st.title("EEG emotion decoder · live")
+    st.markdown("Weights for 5 emotions, updated every few seconds while the EEG arrives. Run the app on the "
+                "computer that records (`streamlit run streamlit_app.py`) and pick where the EEG comes from.")
+    src_kind = st.sidebar.radio("EEG comes from", ["A CSV that is being written", "LSL stream (EmotivPRO)",
+                                                    "Simulation (replay an example)"])
+    path, from_end, ex, speed = None, True, None, 1.0
+    if src_kind == "A CSV that is being written":
+        path = st.sidebar.text_input("Path of the CSV", placeholder=r"C:\Users\me\Documents\EmotivPRO\recording.csv",
+                                     help="Windows paths work as they are. The program writing the file must add "
+                                          "rows continuously (Timestamp + EEG.Cz ... EEG.F8).")
+        from_end = st.sidebar.checkbox("Only new data (start at the end of the file)", value=True,
+                                       help="Untick to replay the file from its beginning.")
+    elif src_kind == "Simulation (replay an example)":
+        ex = st.sidebar.selectbox("Example", list(EXAMPLES))
+        speed = st.sidebar.select_slider("Speed", [1.0, 2.0, 4.0, 8.0], value=1.0)
+    every = st.sidebar.slider("A window every (s)", 1.0, 6.0, 3.0, 0.5)
+    calib = st.sidebar.slider("Calibration windows", 5, 40, 10,
+                              help="The first windows only estimate the session alignment; weights start after them.")
+    block = st.sidebar.slider("Average over the last N windows", 1, 8, 4)
+    markers = st.sidebar.checkbox("Optional: windows at stimulus markers instead",
+                                  help="CSV: the MarkerIndex column. LSL: a stream of type Markers. Simulation: the example's markers.")
+
+    c1, c2, _ = st.columns([1, 1, 6])
+    if c1.button("⏵ Start", type="primary", width="stretch"):
+        try:
+            if src_kind == "A CSV that is being written":
+                if not path:
+                    raise ValueError("enter the path of the CSV")
+                source = CsvTail(path, from_end=from_end)
+            elif src_kind == "LSL stream (EmotivPRO)":
+                source = LslSource(markers=markers)
+            else:
+                source = ReplaySource(read_recording(ROOT / "examples" / f"{EXAMPLES[ex]}.csv"), speed)
+            st.session_state.live = {"src": source, "dec": LiveDecoder(every, calib, block, markers), "on": True,
+                                     "t0": time.time(), "err": None}
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Could not start: {e}")
+    if c2.button("⏹ Stop", width="stretch") and "live" in st.session_state:
+        st.session_state.live["on"] = False
+
+    @st.fragment(run_every=1.0)
+    def live_view():
+        L = st.session_state.get("live")
+        if not L:
+            st.info("Choose the source in the sidebar and press Start.")
+            return
+        dec = L["dec"]
+        if L["on"]:
+            try:
+                dec.push(*L["src"].poll()); dec.step(); L["err"] = None
+            except Exception as e:  # noqa: BLE001
+                L["err"] = str(e)
+        if L["err"]:
+            st.warning(f"Waiting for data: {L['err']}")
+        m = st.columns(4)
+        m[0].metric("Status", "running" if L["on"] else "stopped")
+        m[1].metric("EEG received", f"{dec.n_samples / SFREQ:.0f} s")
+        m[2].metric("Calibration", f"{min(len(dec.calib_windows), dec.calib)} / {dec.calib}")
+        m[3].metric("Windows decoded", len(dec.results))
+        if not dec.n_samples and L["on"] and time.time() - L["t0"] > 5:
+            st.warning("No EEG is arriving yet: is the recording running and the path/stream right?")
+        if not dec.results:
+            need = dec.calib * dec.every + 5
+            st.info(f"Collecting EEG for the session alignment: the first weights appear after about {need:.0f} s.")
+        else:
+            r = dec.results[-1]
+            wb = r["block_weights"]; top = max(wb, key=wb.get)
+            left, right = st.columns([1, 2])
+            with left:
+                st.markdown(f"<div style='font-size:15px;color:#666'>now (last {dec.block} windows)</div>"
+                            f"<div style='font-size:46px;font-weight:700;color:{EMO_COLORS[top]}'>{top}</div>",
+                            unsafe_allow_html=True)
+                fb = go.Figure(go.Bar(y=EMOS, x=[wb[e] for e in EMOS], orientation="h",
+                                      marker_color=[EMO_COLORS[e] for e in EMOS], text=[f"{wb[e]:.0%}" for e in EMOS]))
+                fb.add_vline(x=0.2, line=dict(dash="dot", color="#999"))
+                fb.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10), xaxis=dict(range=[0, 1]),
+                                 yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fb, width="stretch", key="live_bar")
+            with right:
+                hist = dec.results[-60:]
+                t = [h["start"] - dec.results[0]["start"] for h in hist]
+                fl = go.Figure()
+                for e in EMOS:
+                    fl.add_trace(go.Scatter(x=t, y=[h["block_weights"][e] for h in hist], mode="lines", name=e,
+                                            line=dict(color=EMO_COLORS[e], width=2), stackgroup="w"))
+                fl.update_layout(height=290, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="s",
+                                 yaxis=dict(range=[0, 1], title="weight"), legend=dict(orientation="h", y=1.12))
+                st.plotly_chart(fl, width="stretch", key="live_hist")
+        ts, x = dec.recent_eeg(10.0)
+        if len(ts):
+            fe = go.Figure()
+            tr, sp = stacked(x - np.median(x, axis=1, keepdims=True), VIEW, ts - ts[-1])
+            for t_ in tr:
+                fe.add_trace(t_)
+            fe.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="last 10 s",
+                             yaxis=dict(tickvals=[-j * sp for j in range(len(VIEW))], ticktext=VIEW))
+            st.plotly_chart(fe, width="stretch", key="live_eeg")
+        if dec.results:
+            df = pd.DataFrame([{"t_s": round(h["start"] - dec.results[0]["start"], 2),
+                                **{f"w_{k}": v for k, v in h["weights"].items()},
+                                **{f"block_{k}": v for k, v in h["block_weights"].items()}} for h in dec.results])
+            st.download_button("Download the weights so far (CSV)", df.to_csv(index=False).encode(),
+                                "live_weights.csv", "text/csv", key=f"dl{len(df)}")
+
+    live_view()
+    st.caption("Accuracy was measured on windows aligned to image onsets (26–28% on new recordings, chance 20%); "
+               "continuous windows have not been measured. Use the weights as an EEG-driven control signal.")
+
+
+if app_mode.startswith("Live"):
+    live_page()
+    st.stop()
 
 src = st.sidebar.radio("Recording", list(EXAMPLES) + ["Upload my CSV"])
-onset_tbl = None
 if src == "Upload my CSV":
-    up = st.sidebar.file_uploader("EmotivPRO CSV export of one session", type=["csv"])
+    up = st.sidebar.file_uploader("EmotivPRO CSV export (EEG)", type=["csv"])
     data = up.getvalue() if up else None
-    oup = st.sidebar.file_uploader("Stimulus onsets CSV (column onset_unix; optional column emotion)", type=["csv"],
-                                   help="Needed when the recording has no markers. Same clock as the Timestamp column.")
-    if oup:
-        try:
-            onset_tbl = read_onsets_table(oup)
-        except Exception as e:  # noqa: BLE001
-            st.sidebar.error(f"Could not read the onsets CSV: {e}")
 else:
     name = EXAMPLES[src]
     data = (ROOT / "examples" / f"{name}.csv").read_bytes()
-    use_truth = st.sidebar.checkbox("Use the example's onsets file (has the true emotions)", value=True)
-    if use_truth:
+
+st.sidebar.subheader("Windows")
+every = st.sidebar.slider("A window every (s)", 1.0, 6.0, 3.0, 0.5,
+                          help="Each window: 0.5 s before to 5.0 s after its start. Only the EEG is needed.")
+onset_tbl, use_markers = None, False
+if st.sidebar.checkbox("Optional: use stimulus onsets instead", value=False,
+                       help="Place windows at the moments stimuli appeared: from markers in the CSV or an onsets CSV."):
+    if src == "Upload my CSV":
+        how = st.sidebar.radio("Onsets from", ["Markers in the CSV", "An onsets CSV"], horizontal=True)
+        if how == "Markers in the CSV":
+            use_markers = True
+        else:
+            oup = st.sidebar.file_uploader("Onsets CSV (column onset_unix; optional column emotion)", type=["csv"],
+                                           help="Same clock as the Timestamp column of the EEG CSV.")
+            if oup:
+                try:
+                    onset_tbl = read_onsets_table(oup)
+                except Exception as e:  # noqa: BLE001
+                    st.sidebar.error(f"Could not read the onsets CSV: {e}")
+    else:
         onset_tbl = read_onsets_table(ROOT / "examples" / f"{name}_onsets.csv")
+        st.sidebar.caption("Using the example's onsets file (it also has the true emotions).")
 
 st.sidebar.subheader("Weights")
-block = st.sidebar.slider("Average over the last N trials", 1, 8, 4,
-                          help="Blocks are more accurate on real data: 1 trial 26-28%, 2 trials 29%, 8 trials 33% (chance 20%).")
-mode = st.sidebar.radio("Probabilities", ["model", "calibrated"], horizontal=True,
-                        help="calibrated = divided by the temperature fitted on held-out data: honest, but almost uniform.")
-sharp = st.sidebar.slider("Contrast (visual only)", 1.0, 5.0, 1.0, 0.5)
-sliding = None
-with st.sidebar.expander("Experimental"):
-    if st.checkbox("No onsets? Use sliding windows", help="The model was trained on stimulus onsets; this is a rough continuous read-out."):
-        sliding = st.slider("Window every (s)", 1.0, 6.0, 3.0, 0.5)
+block = st.sidebar.slider("Average over the last N windows", 1, 8, 4,
+                          help="Averaging makes the weights steadier (on stimulus-aligned real data: 1 window 26-28%, 8 windows 33%, chance 20%).")
+mode, sharp = "model", 1.0
 st.sidebar.markdown(f"---\n[Code, CLI and contributing]({REPO})")
 
 # ------------------------------------------------------------------ header
 st.title("EEG emotion decoder")
 st.markdown(
-    "For every stimulus in an Emotiv FLEX2 recording this app gives **weights for 5 emotions** "
-    "(Joy, Tenderness, Serenity, Nostalgia, Melancholy). Four steps, shown below for each trial: "
-    "**① cut** the 5.5 s around the stimulus · **② align** the session (removes differences in headset "
-    "placement, no labels needed) · **③ measure the evoked response**: the brain's reply in the first "
-    "940 ms, as 30 channels × 20 time bins · **④ compare** it with the average response of each emotion "
+    "From the EEG of an Emotiv FLEX2 recording, this app gives **weights for 5 emotions** "
+    "(Joy, Tenderness, Serenity, Nostalgia, Melancholy) for a window every few seconds. Only the EEG CSV is "
+    "needed. Four steps, shown below for each window: "
+    "**① cut** 5.5 s of EEG · **② align** the session (removes differences in headset "
+    "placement, no labels needed) · **③ measure the response shape**: the first "
+    "940 ms of the window, as 30 channels × 20 time bins · **④ compare** it with the average response of each emotion "
     "(shrinkage LDA) → 5 probabilities.")
 with st.expander("How good is it? (read this)"):
     st.markdown("""
 - Trained on **one participant**: 370 image trials, 30-channel Emotiv FLEX2, 256 Hz, EmotivPRO's band-passed
   export, no other cleaning.
 - Top emotion on **recordings the model never saw: 26–28%** (chance 20%, p < 0.01). Averaging over 8 trials: 33%.
+  These numbers were measured with windows starting at image onsets; for windows at other moments
+  (the default here) accuracy has not been measured yet.
 - On **pictures it never saw: 22.6%, not significant**; part of the signal may be the specific pictures.
 - Only **image** stimuli: videos and action images score at chance.
-- The probability values are over-confident; *calibrated* mode is honest and almost uniform.
+- The probability values are over-confident: read them as a ranking, not as certainties.
 - Use it as an **EEG-driven control signal** (e.g. for generative art), not as a measurement of emotion.
 - The examples are **synthetic** (noise + the model's own average response for a known emotion), so the
   pipeline should recover their emotions far better than on real EEG. They show how it works, not how well.
 """)
 
 if data is None:
-    st.info("Upload an EmotivPRO CSV export in the sidebar, or pick an example. Without markers in the file, "
-            "also upload a CSV of stimulus onsets (column `onset_unix`).")
+    st.info("Upload an EmotivPRO CSV export (EEG) in the sidebar, or pick an example.")
     st.stop()
 
 key = hashlib.md5(data).hexdigest()
@@ -127,9 +254,9 @@ except RecordingError as e:
     st.stop()
 okey = hashlib.md5(onset_tbl.to_csv().encode()).hexdigest() if onset_tbl is not None else "none"
 try:
-    table, trials, onsets, flat, proba, Rcov, W = run(f"{key}-{okey}", rec, onset_tbl, sliding, block, mode, sharp)
+    table, trials, onsets, flat, proba, Rcov, W = run(f"{key}-{okey}", rec, onset_tbl, every, use_markers, block, mode, sharp)
 except ValueError as e:
-    st.warning(str(e) + ". Tip: the sidebar's Experimental section has sliding windows.")
+    st.warning(str(e))
     st.stop()
 
 n = len(table)
@@ -141,16 +268,16 @@ acc = label_accuracy(table, EMOS)
 
 c = st.columns(5)
 c[0].metric("Duration", f"{(rec['ts'][-1] - ts0) / 60:.1f} min")
-c[1].metric("Trials", n)
+c[1].metric("Windows", n)
 c[2].metric("Flat (no signal)", int(flat.sum()))
 if acc:
     c[3].metric("Top emotion correct", f"{acc['accuracy']:.0%}", f"chance {acc['chance']:.0%}", delta_color="off")
     if "block_accuracy" in acc:
         c[4].metric(f"Block of {block} correct", f"{acc['block_accuracy']:.0%}")
 else:
-    c[3].metric("Session alignment from", f"{int((~flat).sum())} trials")
+    c[3].metric("Session alignment from", f"{int((~flat).sum())} windows")
 if (~flat).sum() < 10:
-    st.warning("Fewer than 10 usable trials: the session alignment is estimated from very little data.")
+    st.warning("Fewer than 10 usable windows: the session alignment is estimated from very little data.")
 if table.attrs.get("n_outside"):
     st.info(f"{table.attrs['n_outside']} onsets fall outside the recording and were skipped.")
 
@@ -181,17 +308,17 @@ if acc:
                             marker=dict(symbol="square", size=11, color=[EMO_COLORS.get(v, "#999") for v in lab]),
                             hovertext=lab, hoverinfo="text"))
 wf.update_layout(barmode="stack", height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(range=[0, 1.12]),
-                 xaxis_title="trial", yaxis_title="weight", legend=dict(orientation="h", y=1.15))
+                 xaxis_title="window", yaxis_title="weight", legend=dict(orientation="h", y=1.15))
 st.plotly_chart(wf, width="stretch")
-st.caption(("Weights averaged over the last %d trials. " % block if block > 1 else "Single-trial weights. ")
+st.caption(("Weights averaged over the last %d windows. " % block if block > 1 else "Single-window weights. ")
            + ("Squares on top: the true emotion from the onsets file." if acc else "")
-           + " Vertical lines above: each stimulus, coloured by its top emotion (grey = flat, no prediction).")
+           + " Vertical lines above: the start of each window, coloured by its top emotion (grey = flat, no prediction).")
 
 
 # ------------------------------------------------------------------ trial player
 @st.fragment
 def player():
-    st.subheader("Inside one trial, step by step")
+    st.subheader("Inside one window, step by step")
     if "trial" not in st.session_state or st.session_state.trial >= n:
         st.session_state.trial = 0
     if st.session_state.get("playing"):
@@ -207,10 +334,10 @@ def player():
     if b[2].button("⏸ Pause" if playing else "⏵ Play", width="stretch"):
         st.session_state.playing = not playing
         st.rerun(scope="fragment")
-    b[3].slider("Trial", 0, n - 1, key="trial", format="%d", label_visibility="collapsed")
+    b[3].slider("Window", 0, n - 1, key="trial", format="%d", label_visibility="collapsed")
 
     i = st.session_state.trial
-    head = f"**Trial {i + 1} / {n}** · stimulus at **{int(t_tr[i] // 60)}:{t_tr[i] % 60:04.1f}**"
+    head = f"**Window {i + 1} / {n}** · starts at **{int(t_tr[i] // 60)}:{t_tr[i] % 60:04.1f}**"
     if acc:
         head += f" · true emotion: **{table.loc[i, acc['label_column']]}**"
     st.markdown(head + (" · ⚠️ flat: the headset was not recording, no prediction" if flat[i] else
@@ -220,7 +347,7 @@ def player():
     seg = trials[i]
     left, right = st.columns(2)
     with left:
-        st.markdown("**① Cut.** 0.5 s before the stimulus to 5.0 s after (1408 samples × 30 channels). "
+        st.markdown("**① Cut.** 5.5 s of EEG: 0.5 s before the window start to 5.0 s after (1408 samples × 30 channels). "
                     "The model uses the shaded 0–940 ms.")
         f1 = go.Figure()
         tr, sp = stacked(seg - np.median(seg, axis=1, keepdims=True), VIEW, tt)
@@ -228,7 +355,7 @@ def player():
             f1.add_trace(t_)
         f1.add_vrect(x0=0, x1=0.9375, fillcolor="#3E8ED0", opacity=0.1, line_width=0)
         f1.add_vline(x=0, line=dict(color="#c0392b", width=1.5))
-        f1.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="s from stimulus",
+        f1.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="s from window start",
                          yaxis=dict(tickvals=[-j * sp for j in range(len(VIEW))], ticktext=VIEW))
         st.plotly_chart(f1, width="stretch", key="f1")
 
@@ -246,20 +373,20 @@ def player():
 
     with right:
         if flat[i]:
-            st.info("This trial is flat on every channel, so it gets no weights and is left out of the alignment.")
+            st.info("This window is flat on every channel, so it gets no weights and is left out of the alignment.")
         else:
-            st.markdown("**③ Evoked response.** Aligned trial, filtered 1–30 Hz, minus its pre-stimulus mean; "
+            st.markdown("**③ Response shape.** Aligned window, filtered 1–30 Hz, minus its first 0.5 s mean; "
                         "0–940 ms averaged into 20 bins of 47 ms → 30 × 20 = 600 numbers.")
             erp = erp_filtered(W @ seg.astype(np.float64))
             F = erp[:, ONSET:ONSET + N_BINS * 12].reshape(30, N_BINS, 12).mean(2)
             bins_ms = (np.arange(N_BINS) + 0.5) * BIN_MS
             h3 = go.Figure(go.Heatmap(z=F, x=np.round(bins_ms), y=CHANNELS, colorscale="RdBu_r", zmid=0,
                                       colorbar=dict(thickness=8), hovertemplate="%{y} · %{x} ms: %{z:.2f}<extra></extra>"))
-            h3.update_layout(height=250, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="ms after stimulus",
+            h3.update_layout(height=250, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="ms after window start",
                              yaxis=dict(tickfont=dict(size=8), autorange="reversed"))
             st.plotly_chart(h3, width="stretch", key="f3")
 
-            st.markdown("**④ Compare with each emotion's average response** (posterior channels shown), "
+            st.markdown("**④ Compare with each emotion's average response shape** (posterior channels shown), "
                         "then shrinkage LDA → probabilities.")
             T = model.templates()
             pi = [CHANNELS.index(c) for c in POSTERIOR]
@@ -267,19 +394,19 @@ def player():
             for k, e in enumerate(EMOS):
                 f4.add_trace(go.Scatter(x=bins_ms, y=T[k][pi].mean(0), mode="lines", name=e,
                                         line=dict(color=EMO_COLORS[e], width=1.5, dash="dot")))
-            f4.add_trace(go.Scatter(x=bins_ms, y=F[pi].mean(0), mode="lines+markers", name="this trial",
+            f4.add_trace(go.Scatter(x=bins_ms, y=F[pi].mean(0), mode="lines+markers", name="this window",
                                     line=dict(color="black", width=2.5)))
-            f4.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="ms after stimulus",
+            f4.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="ms after window start",
                              legend=dict(font=dict(size=9)))
             st.plotly_chart(f4, width="stretch", key="f4")
 
             p = table.loc[i, wcols].to_numpy(float)
             pb = table.loc[i, bcols].to_numpy(float)
             f5 = go.Figure()
-            f5.add_trace(go.Bar(y=EMOS, x=p, orientation="h", name="this trial",
+            f5.add_trace(go.Bar(y=EMOS, x=p, orientation="h", name="this window",
                                 marker_color=[EMO_COLORS[e] for e in EMOS], text=[f"{v:.0%}" for v in p]))
             if block > 1:
-                f5.add_trace(go.Bar(y=EMOS, x=pb, orientation="h", name=f"last {block} trials",
+                f5.add_trace(go.Bar(y=EMOS, x=pb, orientation="h", name=f"last {block} windows",
                                     marker_color="rgba(0,0,0,0.25)", text=[f"{v:.0%}" for v in pb]))
             f5.add_vline(x=0.2, line=dict(dash="dot", color="#999"))
             f5.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10), barmode="group",
@@ -296,7 +423,7 @@ def player():
 player()
 
 # ------------------------------------------------------------------ table + downloads
-st.subheader("Weights per trial")
+st.subheader("Weights per window")
 st.download_button("Download weights (CSV)", table.to_csv(index=False).encode(), "emotion_weights.csv", "text/csv")
 st.dataframe(table, width="stretch", height=260, hide_index=True)
 with st.expander("Use it from code or the command line"):

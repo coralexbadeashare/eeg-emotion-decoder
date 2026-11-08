@@ -88,14 +88,14 @@ def test_examples_positive_control(name, min_acc):
 
 
 def test_markers_equal_onsets_file():
-    a, _ = decode_csv(EX / "example_1_clear.csv")                                   # markers in the CSV
+    a, _ = decode_csv(EX / "example_1_clear.csv", use_markers=True)                  # markers in the CSV
     b, _ = decode_csv(EX / "example_1_clear.csv", EX / "example_1_clear_onsets.csv")
     np.testing.assert_allclose(a["w_Joy"], b["w_Joy"], atol=1e-3)
 
 
 def test_example_3_needs_onsets_and_flags_dropouts():
-    with pytest.raises(ValueError, match="no stimulus onsets"):
-        decode_csv(EX / "example_3_hard_no_markers.csv")
+    with pytest.raises(ValueError, match="no markers"):
+        decode_csv(EX / "example_3_hard_no_markers.csv", use_markers=True)
     table, _ = decode_csv(EX / "example_3_hard_no_markers.csv", EX / "example_3_hard_no_markers_onsets.csv")
     assert table["flat"].sum() == 2 and table.loc[table.flat, "top_emotion"].isna().all()
 
@@ -121,3 +121,58 @@ def test_reader_plain_csv_and_missing_channel():
     assert rec["eeg"].shape == (30, 10)
     with pytest.raises(RecordingError, match="F8"):
         read_recording(io.BytesIO((",".join(["Timestamp"] + [f"EEG.{c}" for c in CHANNELS[:-1]]) + "\n").encode()))
+
+
+def test_default_is_eeg_only_windows():
+    table, d = decode_csv(EX / "example_3_hard_no_markers.csv")                      # no onsets, no markers
+    rec = d.recording
+    expected = len(np.arange(rec["ts"][0] + 0.5, rec["ts"][-1] - 5.0, 3.0))
+    assert len(table) == expected and np.allclose(np.diff(d.onsets), 3.0, atol=1e-6)
+    t2, _ = decode_csv(EX / "example_3_hard_no_markers.csv", sliding_step=2.0)
+    assert len(t2) > len(table)
+
+
+def test_cli_default_eeg_only(tmp_path):
+    out = tmp_path / "w.csv"
+    cli_main([str(EX / "example_1_clear.csv"), "--out", str(out)])
+    t = pd.read_csv(out)
+    assert len(t) > 30 and "emotion" not in t
+
+
+def _grow(src_path, dst_path, n_parts):
+    """Yield after writing each part of src to dst, like a recorder appending rows."""
+    lines = Path(src_path).read_text().splitlines(keepends=True)
+    head, body = lines[:2], lines[2:]
+    step = len(body) // n_parts + 1
+    with open(dst_path, "w") as f:
+        f.writelines(head); f.flush(); yield
+        for i in range(0, len(body), step):
+            chunk = "".join(body[i:i + step])
+            cut = len(chunk) // 2 if i + step < len(body) else len(chunk)   # also split a line in two
+            f.write(chunk[:cut]); f.flush(); yield
+            f.write(chunk[cut:]); f.flush(); yield
+
+
+def test_live_csv_tail_markers_recovers_emotions(tmp_path):
+    from emotion_decoder.live import LiveDecoder, CsvTail
+    dst = tmp_path / "growing.csv"
+    dec, tail = LiveDecoder(calib=8, block=1, use_markers=True), None
+    for _ in _grow(EX / "example_1_clear.csv", dst, 25):
+        tail = tail or CsvTail(str(dst))
+        dec.push(*tail.poll()); dec.step()
+    truth = pd.read_csv(EX / "example_1_clear_onsets.csv")["emotion"].tolist()
+    got = [max(r["weights"], key=r["weights"].get) for r in dec.results]
+    assert len(got) == 12 and np.mean([g == t for g, t in zip(got, truth[8:])]) >= 0.9
+    assert tail.rows == 124 * 256 or abs(tail.rows - len(read_recording(EX / "example_1_clear.csv")["ts"])) == 0
+
+
+def test_live_default_windows_every_3s(tmp_path):
+    from emotion_decoder.live import LiveDecoder, CsvTail
+    dst = tmp_path / "growing.csv"
+    dec, tail = LiveDecoder(every=3.0, calib=5), None
+    for _ in _grow(EX / "example_2_moderate.csv", dst, 10):
+        tail = tail or CsvTail(str(dst))
+        dec.push(*tail.poll()); dec.step()
+    starts = [r["start"] for r in dec.results]
+    assert len(dec.calib_windows) >= 35 and len(starts) == len(dec.calib_windows) - 5
+    assert np.allclose(np.diff(starts), 3.0)

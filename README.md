@@ -2,15 +2,15 @@
 
 [![tests](https://github.com/coralexbadeashare/eeg-emotion-decoder/actions/workflows/tests.yml/badge.svg)](https://github.com/coralexbadeashare/eeg-emotion-decoder/actions/workflows/tests.yml)
 
-Weights for **5 emotions** (Joy, Tenderness, Serenity, Nostalgia, Melancholy) for every image stimulus in
-an **Emotiv FLEX2** EEG recording. Three ways to use it, all on a plain laptop (CPU, no GPU):
+Weights for **5 emotions** (Joy, Tenderness, Serenity, Nostalgia, Melancholy) from **Emotiv FLEX2** EEG,
+for a window every few seconds. Only the EEG is needed. All of it runs on a plain laptop (CPU, no GPU):
 
 | | |
 |---|---|
-| **Streamlit app** | upload a CSV and watch every step, trial by trial: `streamlit run streamlit_app.py` |
-| **Command line** | `python -m emotion_decoder recording.csv --onsets onsets.csv --out weights.csv` |
+| **Streamlit app** | upload a CSV and watch every step, window by window: `streamlit run streamlit_app.py` |
+| **Live** (in the app, run locally) | follow a CSV that is being written, an LSL stream, or a replayed example |
+| **Command line** | `python -m emotion_decoder recording.csv --out weights.csv` |
 | **Python** | `from emotion_decoder import decode_csv` |
-| **Live** (work in progress) | `python live_lsl.py`: from the headset through Lab Streaming Layer |
 
 Pull requests are welcome from anyone; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -26,13 +26,14 @@ pip install -r requirements.txt          # numpy, scipy, pandas, streamlit, plot
 
 ```bash
 streamlit run streamlit_app.py
-python -m emotion_decoder examples/example_1_clear.csv --block 4
-python -m emotion_decoder examples/example_3_hard_no_markers.csv --onsets examples/example_3_hard_no_markers_onsets.csv
+python -m emotion_decoder examples/example_1_clear.csv --block 4                    # EEG only
+python -m emotion_decoder examples/example_1_clear.csv --onsets examples/example_1_clear_onsets.csv
 ```
 
 The three files in [examples/](examples/) are **synthetic**: background noise plus, at every stimulus, the
-model's own average response for a known emotion. They show the file formats and let you check that the
-pipeline recovers what was put in (100%, 90% and 78% of trials). They say nothing about accuracy on real EEG.
+model's own average response for a known emotion. They show the file format, and with their onsets files
+they let you check that the pipeline recovers what was put in (100%, 90% and 78% of trials). They say
+nothing about accuracy on real EEG.
 
 ## Your own recordings
 
@@ -41,34 +42,34 @@ are two). The tool reads the `Timestamp` column and the 30 columns `EEG.Cz` … 
 the file is ignored. A plain CSV with columns `Cz, Fz, …, F8` (µV, 256 Hz) also works. One file = one session
 (one headset placement).
 
-**2. When each stimulus appeared**. Either:
-- markers inside the CSV (EmotivPRO's `MarkerIndex` column), used automatically; or
-- an onsets CSV with a column `onset_unix`: stimulus onset in Unix seconds, on the same clock as the
-  recording's `Timestamp` column. Extra columns are copied to the output. A column **`emotion`** holding
-  the true emotion names makes the tools report accuracy.
-
-```csv
-onset_unix,emotion,stimulus
-1778083701.512,Joy,img_014.jpg
-1778083709.034,Melancholy,img_102.jpg
-```
-
-**3. Run**
+**2. Run**
 
 ```bash
-python -m emotion_decoder rec.csv --onsets onsets.csv --block 4 --out weights.csv
+python -m emotion_decoder rec.csv --block 4 --out weights.csv        # a window every 3 s (--every N)
 ```
 
-The output has one row per stimulus: `w_Joy … w_Melancholy` (sum to 1), `top_emotion`, and with
-`--block N` the same averaged over the last N trials (more accurate). `--mode calibrated` gives honest,
-nearly uniform probabilities. Trials where the headset was not recording (flat) get no weights.
+The output has one row per window: `w_Joy … w_Melancholy` (sum to 1), `top_emotion`, and with `--block N`
+the same averaged over the last N windows (steadier). Windows where the headset was not recording (flat)
+get no weights.
+
+**Optional: stimulus onsets.** If you know when each stimulus appeared, windows can start there instead:
+`--markers` uses EmotivPRO's `MarkerIndex` column, `--onsets onsets.csv` a CSV with a column `onset_unix`
+(Unix seconds, same clock as `Timestamp`). Extra columns are copied to the output; a column `emotion` with
+the true emotion names makes the tools report accuracy.
+
+```csv
+onset_unix,emotion
+1778083701.512,Joy
+1778083709.034,Melancholy
+```
 
 **From Python**
 
 ```python
 from emotion_decoder import decode_csv, EmotionModel
 
-table, details = decode_csv("rec.csv", "onsets.csv", block=4)
+table, details = decode_csv("rec.csv", block=4)              # EEG only, a window every 3 s
+table, details = decode_csv("rec.csv", "onsets.csv", block=4)  # optional onsets
 
 # or with trials you already cut: (n, 30, 1408), 256 Hz, from 0.5 s before to 5.0 s after each onset
 m = EmotionModel().calibrate(session_trials)      # one session, no labels needed
@@ -78,7 +79,8 @@ m.weights_block(last_four_trials)
 
 ## How it works
 
-1. **Cut** each trial from 0.5 s before to 5.0 s after the stimulus: 1408 samples × 30 channels.
+1. **Cut** windows of 5.5 s (1408 samples × 30 channels): one every few seconds, or from 0.5 s before
+   to 5.0 s after each stimulus when onsets are given.
 2. **Align the session** (Euclidean alignment): R = average spatial covariance of the session's trials
    (1–45 Hz, 0–4 s); every trial X becomes R^-½ X. This removes differences in headset placement between
    sessions and needs no labels, only the session's own EEG.
@@ -95,7 +97,7 @@ The model (`models/emotion5_v2.json`) is plain numbers exported from the scikit-
 ## How good is it
 
 Trained on **one participant** (370 image trials, Emotiv FLEX2, 256 Hz, EmotivPRO band-passed export, no
-other cleaning). Top emotion, chance 20%:
+other cleaning). Top emotion, chance 20%, measured with windows starting at image onsets:
 
 | test | accuracy |
 |---|---|
@@ -105,33 +107,32 @@ other cleaning). Top emotion, chance 20%:
 | pictures never seen in training | 22.6% (p = 0.12, **not significant**) |
 | videos, action images | chance |
 
-So: above chance, but weak; it may partly reflect the specific pictures; it works for images only; the raw
+Windows at other moments (the default) have not been measured yet. So: above chance, but weak; it may partly reflect the specific pictures; it works for images only; the raw
 probabilities are over-confident. Use the weights as an **EEG-driven control signal** (for example for
 generative art), not as a measurement of someone's emotion. Other people and other headsets are untested.
 
-## Live (work in progress)
+## Live
 
-`live_lsl.py` reads the EEG and a stimulus-marker stream from **Lab Streaming Layer**; EmotivPRO can stream
-to LSL. The first `--calib` trials calibrate the session alignment; after that each stimulus is decoded 5 s
-after its onset and printed. Untested with a real headset so far. It was tested with a fake headset that
-replays a CSV:
+Run the app on the computer that records, choose **Live** in the sidebar, then the source:
 
-```bash
-pip install -r requirements-live.txt
-python tools/replay_csv_to_lsl.py examples/example_1_clear.csv --speed 4   # terminal 1: fake headset
-python live_lsl.py --calib 8                                               # terminal 2
-```
+- **A CSV that is being written**: paste its path (Windows paths work as they are). The app reads only the
+  new rows, every second. Whatever writes the file must append rows continuously (`Timestamp`,
+  `EEG.Cz` … `EEG.F8`).
+- **LSL stream**: EmotivPRO can stream EEG to Lab Streaming Layer (needs `pip install -r requirements-live.txt`).
+- **Simulation**: replays an example as if it were arriving now, to try everything without a headset.
 
-Without a marker stream, `--every 6` decodes a window every 6 s (experimental: the model was trained on
-stimulus onsets).
+The first windows (10 by default, about 35 s) only calibrate the session alignment; after that, the weights
+update with every new window. Untested with a real headset so far: reports and pull requests welcome.
+The same from a terminal: `python live_lsl.py` (LSL), and `tools/replay_csv_to_lsl.py` replays a CSV as a
+fake LSL headset.
 
 ## Files
 
 | | |
 |---|---|
-| `emotion_decoder/` | the package: `io` (CSV reading), `preprocess` (cutting), `model` (alignment, ERP, LDA), `pipeline`, `cli` |
+| `emotion_decoder/` | the package: `io` (CSV reading), `preprocess` (cutting), `model` (alignment, ERP, LDA), `pipeline`, `cli`, `live` |
 | `streamlit_app.py` | the app |
-| `live_lsl.py` | live decoding over LSL (work in progress) |
+| `live_lsl.py` | live decoding over LSL from a terminal |
 | `models/emotion5_v2.json` | the model |
 | `examples/` | three synthetic recordings + onsets files |
 | `tools/` | model export, example generation, CSV → LSL replay |
