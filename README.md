@@ -65,6 +65,13 @@ dec.results                        # every decoded window so far
 dec.skipped                        # windows skipped (flat signal or dropped packets)
 ```
 
+```python
+# your stream carries its own channels, in its own order (labels as your stream/device gives them):
+my_channels = ["COUNTER", "EEG.Fz", "EEG.Cz", "EEG.F7", ..., "EEG.F8", "CQ.Overall"]
+dec = LiveDecoder(every=3.0, calib=10, block=4, channel_names=my_channels)
+dec.push(timestamps, eeg)          # eeg: (len(my_channels), n), rows in the same order as my_channels
+```
+
 `channel_names` picks the 30 model channels **by name** from whatever your stream carries ("Cz" or
 EmotivPRO's "EEG.Cz", in any order, extra channels such as counters or contact quality are ignored).
 Without it, `push` expects exactly the 30 channels in `CHANNELS` order. For arrays you hold yourself:
