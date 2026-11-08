@@ -173,8 +173,6 @@ def live_page():
                                 "live_weights.csv", "text/csv", key=f"dl{len(df)}")
 
     live_view()
-    st.caption("Accuracy was measured on windows aligned to image onsets (26–28% on new recordings, chance 20%); "
-               "continuous windows have not been measured. Use the weights as an EEG-driven control signal.")
 
 
 if app_mode.startswith("Live"):
@@ -227,20 +225,6 @@ st.markdown(
     "placement, no labels needed) · **③ measure the response shape**: the first "
     "940 ms of the window, as 30 channels × 20 time bins · **④ compare** it with the average response of each emotion "
     "(shrinkage LDA) → 5 probabilities.")
-with st.expander("How good is it? (read this)"):
-    st.markdown("""
-- Trained on **one participant**: 370 image trials, 30-channel Emotiv FLEX2, 256 Hz, EmotivPRO's band-passed
-  export, no other cleaning.
-- Top emotion on **recordings the model never saw: 26–28%** (chance 20%, p < 0.01). Averaging over 8 trials: 33%.
-  These numbers were measured with windows starting at image onsets; for windows at other moments
-  (the default here) accuracy has not been measured yet.
-- On **pictures it never saw: 22.6%, not significant**; part of the signal may be the specific pictures.
-- Only **image** stimuli: videos and action images score at chance.
-- The probability values are over-confident: read them as a ranking, not as certainties.
-- Use it as an **EEG-driven control signal** (e.g. for generative art), not as a measurement of emotion.
-- The examples are **synthetic** (noise + the model's own average response for a known emotion), so the
-  pipeline should recover their emotions far better than on real EEG. They show how it works, not how well.
-""")
 
 if data is None:
     st.info("Upload an EmotivPRO CSV export (EEG) in the sidebar, or pick an example.")
