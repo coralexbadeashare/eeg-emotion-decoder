@@ -12,7 +12,7 @@ import pandas as pd
 
 from .io import read_recording, read_onsets_table
 from .model import EmotionModel
-from .preprocess import cut_trials, is_flat, sliding_onsets
+from .preprocess import cut_trials, is_flat, sliding_onsets, missing_seconds, MAX_MISSING_S
 
 LABEL_COLUMNS = ("emotion", "label", "true_emotion")
 
@@ -21,7 +21,7 @@ LABEL_COLUMNS = ("emotion", "label", "true_emotion")
 class Details:
     trials: np.ndarray                 # (n, 30, 1408) every trial cut, flat ones included
     onsets: np.ndarray                 # (n,) unix seconds
-    flat: np.ndarray                   # (n,) bool
+    flat: np.ndarray                   # (n,) bool: skipped (flat, or data missing inside the window)
     proba: np.ndarray                  # (n, 5) NaN for flat trials
     model: EmotionModel
     recording: dict | None = None
@@ -29,13 +29,17 @@ class Details:
 
 
 def decode_trials(trials, onsets=None, block: int = 1, mode: str = "model", sharp: float = 1.0,
-                  model: EmotionModel | None = None, extra: pd.DataFrame | None = None):
-    """trials: (n, 30, 1408) of ONE session. The session alignment is computed from its non-flat trials."""
+                  model: EmotionModel | None = None, extra: pd.DataFrame | None = None, missing_s=None):
+    """trials: (n, 30, 1408) of ONE session. Windows that are flat, or (missing_s) lost more than 50 ms
+    of data to dropped packets, are skipped, as they were in training. The session alignment is
+    computed from the other windows."""
     model = model or EmotionModel()
     trials = np.asarray(trials, np.float32)
     n = len(trials)
     onsets = np.full(n, np.nan) if onsets is None else np.asarray(onsets, float)
-    flat = is_flat(trials)
+    really_flat = is_flat(trials)
+    missing = np.zeros(n) if missing_s is None else np.asarray(missing_s, float)
+    flat = really_flat | (missing > MAX_MISSING_S)
     good = np.where(~flat)[0]
     proba = np.full((n, len(model.emotions)), np.nan)
     if len(good):
@@ -44,7 +48,8 @@ def decode_trials(trials, onsets=None, block: int = 1, mode: str = "model", shar
 
     rows = []
     for j in range(n):
-        row = {"trial": j + 1, "onset_unix": onsets[j], "flat": bool(flat[j])}
+        row = {"trial": j + 1, "onset_unix": onsets[j], "flat": bool(flat[j]),
+               "skipped": ("flat" if really_flat[j] else f"{missing[j]:.2f} s missing") if flat[j] else ""}
         if not flat[j]:
             w = model.to_weights(proba[j], mode, sharp)
             row.update({f"w_{k}": v for k, v in w.items()})
@@ -88,7 +93,8 @@ def decode_recording(rec: dict, onsets=None, onset_table: pd.DataFrame | None = 
         raise ValueError(f"none of the {len(onsets)} onsets has a full trial inside the recording "
                          "(a trial needs 0.5 s before and 5.0 s after the onset; same clock as Timestamp?)")
     ex = extra.iloc[ok].reset_index(drop=True) if extra is not None else None
-    table, det = decode_trials(trials, onsets[ok], block, mode, sharp, model, ex)
+    table, det = decode_trials(trials, onsets[ok], block, mode, sharp, model, ex,
+                               missing_s=missing_seconds(rec["ts"], onsets[ok]))
     det.recording = rec
     table.attrs["n_onsets"] = len(onsets)
     table.attrs["n_outside"] = len(onsets) - len(ok)

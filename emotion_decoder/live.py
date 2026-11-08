@@ -64,7 +64,8 @@ class LiveDecoder:
         for start in sorted(s for s in self.pending if s + POST_S <= ts[-1]):
             self.pending.remove(start)
             i0 = int(np.searchsorted(ts, start - PRE_S))
-            if i0 + N_SAMPLES > len(ts) or ts[i0] - (start - PRE_S) > 0.05:
+            if (i0 + N_SAMPLES > len(ts) or ts[i0] - (start - PRE_S) > 0.05
+                    or ts[i0 + N_SAMPLES - 1] - ts[i0] - (N_SAMPLES - 1) / SFREQ > 0.05):   # dropped packets
                 self.skipped += 1; continue
             xs = list(self.x)
             win = np.stack(xs[i0:i0 + N_SAMPLES], axis=1)

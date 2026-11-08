@@ -253,7 +253,7 @@ acc = label_accuracy(table, EMOS)
 c = st.columns(5)
 c[0].metric("Duration", f"{(rec['ts'][-1] - ts0) / 60:.1f} min")
 c[1].metric("Windows", n)
-c[2].metric("Flat (no signal)", int(flat.sum()))
+c[2].metric("Skipped", int(flat.sum()), help="No signal (flat) or data missing inside the window (dropped packets); as in training, these get no weights.")
 if acc:
     c[3].metric("Top emotion correct", f"{acc['accuracy']:.0%}", f"chance {acc['chance']:.0%}", delta_color="off")
     if "block_accuracy" in acc:
@@ -291,12 +291,15 @@ if acc:
     wf.add_trace(go.Scatter(x=table["trial"], y=[1.06] * n, mode="markers", name="true emotion", showlegend=False,
                             marker=dict(symbol="square", size=11, color=[EMO_COLORS.get(v, "#999") for v in lab]),
                             hovertext=lab, hoverinfo="text"))
-wf.update_layout(barmode="stack", height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(range=[0, 1.12]),
+if flat.any():
+    wf.add_trace(go.Bar(x=table["trial"][flat], y=[1.0] * int(flat.sum()), name="skipped", marker_color="#d0d0d0",
+                        hovertext=table["skipped"][flat], hoverinfo="text+x"))
+wf.update_layout(barmode="stack", bargap=0, height=260, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(range=[0, 1.12]),
                  xaxis_title="window", yaxis_title="weight", legend=dict(orientation="h", y=1.15))
 st.plotly_chart(wf, width="stretch")
 st.caption(("Weights averaged over the last %d windows. " % block if block > 1 else "Single-window weights. ")
            + ("Squares on top: the true emotion from the onsets file." if acc else "")
-           + " Vertical lines above: the start of each window, coloured by its top emotion (grey = flat, no prediction).")
+           + " Grey: skipped (no signal or data missing). Vertical lines above: the start of each window, coloured by its top emotion.")
 
 
 # ------------------------------------------------------------------ trial player
@@ -324,7 +327,7 @@ def player():
     head = f"**Window {i + 1} / {n}** · starts at **{int(t_tr[i] // 60)}:{t_tr[i] % 60:04.1f}**"
     if acc:
         head += f" · true emotion: **{table.loc[i, acc['label_column']]}**"
-    st.markdown(head + (" · ⚠️ flat: the headset was not recording, no prediction" if flat[i] else
+    st.markdown(head + (f" · ⚠️ skipped ({table.loc[i, 'skipped']}): no prediction" if flat[i] else
                         f" · top emotion: **{table.loc[i, 'top_emotion']}**"))
 
     tt = (np.arange(N_SAMPLES) - ONSET) / SFREQ
@@ -357,7 +360,8 @@ def player():
 
     with right:
         if flat[i]:
-            st.info("This window is flat on every channel, so it gets no weights and is left out of the alignment.")
+            st.info("This window is skipped (no signal, or data missing from dropped packets): no weights, "
+                    "and it is left out of the alignment.")
         else:
             st.markdown("**③ Response shape.** Aligned window, filtered 1–30 Hz, minus its first 0.5 s mean; "
                         "0–940 ms averaged into 20 bins of 47 ms → 30 × 20 = 600 numbers.")

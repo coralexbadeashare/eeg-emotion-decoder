@@ -176,3 +176,14 @@ def test_live_default_windows_every_3s(tmp_path):
     starts = [r["start"] for r in dec.results]
     assert len(dec.calib_windows) >= 35 and len(starts) == len(dec.calib_windows) - 5
     assert np.allclose(np.diff(starts), 3.0)
+
+
+def test_windows_with_dropped_packets_are_skipped():
+    from emotion_decoder import decode_recording
+    rec = read_recording(EX / "example_2_moderate.csv")
+    keep = np.ones(len(rec["ts"]), bool); keep[int(30.0 * 256):int(30.4 * 256)] = False      # 0.4 s lost
+    rec2 = dict(rec, ts=rec["ts"][keep], eeg=rec["eeg"][:, keep])
+    table, _ = decode_recording(rec2)
+    hit = table[table.skipped.str.contains("missing")]
+    assert 1 <= len(hit) <= 3 and hit.top_emotion.isna().all()
+    assert (table.t_s[hit.index] > 23).all() and (table.t_s[hit.index] < 31).all()

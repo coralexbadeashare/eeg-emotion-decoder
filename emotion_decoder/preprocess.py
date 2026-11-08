@@ -29,6 +29,15 @@ def cut_trials(ts: np.ndarray, eeg: np.ndarray, onsets) -> tuple[np.ndarray, np.
     return np.nan_to_num(eeg[:, idx]).transpose(1, 0, 2).astype(np.float32), ok
 
 
+MAX_MISSING_S = 0.05               # training trials with more missing time than this were excluded
+
+
+def missing_seconds(ts: np.ndarray, onsets) -> np.ndarray:
+    """Time lost to dropped packets inside each window (its timestamps span more than 1408 samples)."""
+    starts = np.searchsorted(ts, np.asarray(onsets, float) - PRE_S)
+    return np.maximum(ts[starts + N_SAMPLES - 1] - ts[starts] - (N_SAMPLES - 1) / SFREQ, 0.0)
+
+
 def is_flat(trials: np.ndarray) -> np.ndarray:
     """True where every channel is flat after onset (headset not recording)."""
     trials = np.asarray(trials)

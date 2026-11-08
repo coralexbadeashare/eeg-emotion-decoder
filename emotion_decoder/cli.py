@@ -41,7 +41,7 @@ def main(argv=None):
 
     table.to_csv(a.out, index=False)
     n, n_flat = len(table), int(table["flat"].sum())
-    print(f"{n} windows ({n_flat} flat, no prediction) -> {a.out}")
+    print(f"{n} windows ({n_flat} skipped: flat or data missing) -> {a.out}")
     if table.attrs.get("n_outside"):
         print(f"{table.attrs['n_outside']} onsets fell outside the recording and were skipped")
     if n - n_flat < 10:
